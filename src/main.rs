@@ -56,6 +56,7 @@ mod tree;
 mod tsc_cmd;
 mod utils;
 mod vitest_cmd;
+mod watch_cmd;
 mod wc_cmd;
 mod wget_cmd;
 
@@ -297,6 +298,17 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+
+    /// Run command and show only changes since last run (iterative dev)
+    Watch {
+        /// Command to run and diff against previous output
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Clear watch cache (reset diff history)
+    #[command(name = "watch-clear")]
+    WatchClear,
 
     /// Compact grep - strips whitespace, truncates, groups by file
     Grep {
@@ -1450,6 +1462,15 @@ fn main() -> Result<()> {
             println!("{}", deduped);
         }
 
+        Commands::Watch { command } => {
+            let cmd_str = command.join(" ");
+            watch_cmd::run(&cmd_str, cli.verbose)?;
+        }
+
+        Commands::WatchClear => {
+            watch_cmd::clear()?;
+        }
+
         Commands::Grep {
             pattern,
             path,
@@ -1983,6 +2004,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Context { .. }
             | Commands::Dedup { .. }
+            | Commands::Watch { .. }
+            | Commands::WatchClear
             | Commands::Grep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
