@@ -22,6 +22,7 @@ mod grep_cmd;
 mod gt_cmd;
 mod hook_audit_cmd;
 mod hook_check;
+mod hook_rewrite_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -620,6 +621,14 @@ enum Commands {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         cmd: String,
     },
+
+    /// Native Claude Code PreToolUse hook (reads JSON from stdin, no jq needed)
+    ///
+    /// Cross-platform replacement for hooks/rtk-rewrite.sh.
+    /// Register in ~/.claude/settings.json:
+    ///   "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "rtk hook-rewrite" }] }] }
+    #[command(name = "hook-rewrite")]
+    HookRewrite,
 }
 
 #[derive(Subcommand)]
@@ -1763,6 +1772,10 @@ fn main() -> Result<()> {
 
         Commands::Rewrite { cmd } => {
             rewrite_cmd::run(&cmd)?;
+        }
+
+        Commands::HookRewrite => {
+            hook_rewrite_cmd::run()?;
         }
 
         Commands::Proxy { args } => {
