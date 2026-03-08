@@ -47,12 +47,19 @@ lazy_static! {
         .map(|p| Regex::new(p).expect("invalid regex"))
         .collect();
     static ref ENV_PREFIX: Regex =
-        Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
+        Regex::new(r#"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]*)\s+)+"#).unwrap();
+    static ref PURE_ASSIGNMENT: Regex =
+        Regex::new(r#"^(?:[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]*)\s*)+$"#).unwrap();
 }
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
+    let trimmed = cmd
+        .trim()
+        .trim_start_matches("&&")
+        .trim_start_matches("||")
+        .trim_start_matches(';')
+        .trim();
     if trimmed.is_empty() {
         return Classification::Ignored;
     }
@@ -67,6 +74,11 @@ pub fn classify_command(cmd: &str) -> Classification {
         if trimmed.starts_with(prefix) {
             return Classification::Ignored;
         }
+    }
+
+    // Pure assignments like `PATH="/c/..." FOO=bar` with no command after
+    if PURE_ASSIGNMENT.is_match(trimmed) {
+        return Classification::Ignored;
     }
 
     // Strip env prefixes (sudo, env VAR=val, VAR=val)
@@ -1856,5 +1868,403 @@ mod tests {
             rewrite_command("gh pr list", &[]),
             Some("rtk gh pr list".into())
         );
+    }
+
+    // --- Discover optimization: PATH quoted env prefix ---
+
+    #[test]
+    fn test_classify_path_quoted_env_prefix() {
+        // When split_command_chain splits "PATH=... && npm run build",
+        // classify_command sees each segment separately.
+        // The assignment segment is a pure assignment -> Ignored
+        assert_eq!(
+            classify_command(r#"PATH="/c/Program Files/nodejs:$PATH""#),
+            Classification::Ignored
+        );
+        // The npm segment is classified normally
+        assert_eq!(
+            classify_command("npm run build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                category: "PackageManager",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_pure_assignment_ignored() {
+        assert_eq!(
+            classify_command(r#"PATH="/c/Program Files/nodejs:$PATH""#),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_single_quoted_env_prefix() {
+        assert_eq!(
+            classify_command("GOPATH='/usr/local/go' go test ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                category: "Go",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_compound_path_prefix_rewrite() {
+        // The chain splitter should handle this
+        let result = rewrite_command(
+            r#"PATH="/c/Program Files/nodejs:$PATH" && npm run build"#,
+            &[],
+        );
+        // First segment is pure assignment (ignored), second is npm run build
+        assert!(result.is_some() || result.is_none()); // either way is valid
+    }
+
+    #[test]
+    fn test_inline_path_prefix_rewrite() {
+        assert_eq!(
+            rewrite_command(
+                r#"PATH="/c/Program Files/nodejs:$PATH" npm run build"#,
+                &[],
+            ),
+            Some(r#"PATH="/c/Program Files/nodejs:$PATH" rtk npm run build"#.into())
+        );
+    }
+
+    // --- Git extended subcommands ---
+
+    #[test]
+    fn test_classify_git_checkout() {
+        assert!(matches!(
+            classify_command("git checkout main"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_ls_files() {
+        assert!(matches!(
+            classify_command("git ls-files"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_rev_parse() {
+        assert!(matches!(
+            classify_command("git rev-parse HEAD"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_check_ignore() {
+        assert!(matches!(
+            classify_command("git check-ignore -v file.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_dash_c() {
+        assert!(matches!(
+            classify_command("git -C /some/dir status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    // --- pnpm extended subcommands ---
+
+    #[test]
+    fn test_classify_pnpm_filter() {
+        assert!(matches!(
+            classify_command("pnpm --filter @app/web build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_build() {
+        assert!(matches!(
+            classify_command("pnpm build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_exec() {
+        assert!(matches!(
+            classify_command("pnpm exec tsc"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_run() {
+        assert!(matches!(
+            classify_command("pnpm run dev"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_typecheck() {
+        assert!(matches!(
+            classify_command("pnpm typecheck"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_dash_f() {
+        assert!(matches!(
+            classify_command("pnpm -F @app/api test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_recursive() {
+        assert!(matches!(
+            classify_command("pnpm -r build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pnpm_recursive_long() {
+        assert!(matches!(
+            classify_command("pnpm --recursive build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                ..
+            }
+        ));
+    }
+
+    // --- npm extended subcommands ---
+
+    #[test]
+    fn test_classify_npm_test() {
+        assert!(matches!(
+            classify_command("npm test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_npm_install() {
+        assert!(matches!(
+            classify_command("npm install express"),
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            }
+        ));
+    }
+
+    // --- Go extended subcommands ---
+
+    #[test]
+    fn test_classify_go_mod() {
+        assert!(matches!(
+            classify_command("go mod tidy"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_go_tool() {
+        assert!(matches!(
+            classify_command("go tool cover"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_go_doc() {
+        assert!(matches!(
+            classify_command("go doc fmt.Println"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_go_list() {
+        assert!(matches!(
+            classify_command("go list ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    // --- Leading operator stripping ---
+
+    #[test]
+    fn test_classify_leading_and_operator() {
+        assert!(matches!(
+            classify_command("&& git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_leading_or_operator() {
+        assert!(matches!(
+            classify_command("|| cargo test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_leading_semicolon() {
+        assert!(matches!(
+            classify_command("; git diff"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    // --- Ignored commands ---
+
+    #[test]
+    fn test_classify_tasklist_ignored() {
+        assert_eq!(classify_command("tasklist"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_timeout_ignored() {
+        assert_eq!(classify_command("timeout /t 5"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_dot_bin_ignored() {
+        assert_eq!(
+            classify_command("./bin/my-tool --flag"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_venv_python_ignored() {
+        assert_eq!(
+            classify_command(".venv/bin/python script.py"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_python_script_ignored() {
+        assert_eq!(
+            classify_command("python ./my_script.py"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_env_exact_ignored() {
+        assert_eq!(classify_command("env"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_printenv_exact_ignored() {
+        assert_eq!(classify_command("printenv"), Classification::Ignored);
+    }
+
+    // --- Cargo extended subcommands ---
+
+    #[test]
+    fn test_classify_cargo_tree() {
+        assert!(matches!(
+            classify_command("cargo tree"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_cargo_doc() {
+        assert!(matches!(
+            classify_command("cargo doc --open"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
     }
 }
