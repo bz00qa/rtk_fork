@@ -4,6 +4,7 @@ mod cc_economics;
 mod ccusage;
 mod config;
 mod container;
+mod context_cmd;
 mod curl_cmd;
 mod deps;
 mod diff_cmd;
@@ -280,6 +281,13 @@ enum Commands {
         /// Command to run and summarize
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
+    },
+
+    /// Combined git context: status + diff + log in one call
+    Context {
+        /// Max recent commits to show
+        #[arg(short = 'n', long, default_value = "5")]
+        log_count: usize,
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
@@ -1398,6 +1406,10 @@ fn main() -> Result<()> {
             summary::run(&cmd, cli.verbose)?;
         }
 
+        Commands::Context { log_count } => {
+            context_cmd::run(log_count, cli.verbose)?;
+        }
+
         Commands::Grep {
             pattern,
             path,
@@ -1929,6 +1941,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
+            | Commands::Context { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
