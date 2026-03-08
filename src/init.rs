@@ -648,19 +648,40 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            // Exact match OR both contain rtk-rewrite.sh
+            // Exact match OR both contain rtk-rewrite.sh OR native hook-rewrite
             cmd == hook_command
                 || (cmd.contains("rtk-rewrite.sh") && hook_command.contains("rtk-rewrite.sh"))
+                || cmd.contains("rtk hook-rewrite")
         })
 }
 
-/// Default mode: hook + slim RTK.md + @RTK.md reference
+/// Default mode: native hook + CLAUDE.md injection
 #[cfg(not(unix))]
-fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
-    eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose)
+fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        return run_claude_md_mode(false, verbose);
+    }
+
+    // On Windows, use the native `rtk hook-rewrite` command (no bash/jq needed)
+    let hook_command = "rtk hook-rewrite";
+
+    // 1. Patch CLAUDE.md with RTK instructions
+    run_claude_md_mode(true, verbose)?;
+
+    // 2. Patch settings.json with native hook
+    let dummy_path = std::path::PathBuf::from(hook_command);
+    let patch_result = patch_settings_json(&dummy_path, patch_mode, verbose)?;
+
+    match patch_result {
+        PatchResult::Patched => {}
+        PatchResult::AlreadyPresent => {
+            println!("  settings.json: hook already present");
+            println!("  Restart Claude Code. Test with: git status");
+        }
+        PatchResult::Declined | PatchResult::Skipped => {}
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -724,8 +745,29 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
 
 /// Hook-only mode: just the hook, no RTK.md
 #[cfg(not(unix))]
-fn run_hook_only_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
+fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
+        eprintln!("    For local projects, use default mode or --claude-md");
+        return Ok(());
+    }
+
+    // On Windows, use the native `rtk hook-rewrite` command
+    let hook_command = "rtk hook-rewrite";
+    let dummy_path = std::path::PathBuf::from(hook_command);
+    let patch_result = patch_settings_json(&dummy_path, patch_mode, verbose)?;
+
+    match patch_result {
+        PatchResult::Patched => {
+            println!("✅ Native hook registered (rtk hook-rewrite)");
+        }
+        PatchResult::AlreadyPresent => {
+            println!("✅ Hook already present in settings.json");
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
