@@ -60,7 +60,10 @@ pub fn run() -> Result<()> {
         }
     });
 
-    println!("{}", serde_json::to_string(&response).context("Failed to serialize hook response")?);
+    println!(
+        "{}",
+        serde_json::to_string(&response).context("Failed to serialize hook response")?
+    );
     Ok(())
 }
 

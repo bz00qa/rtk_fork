@@ -47,7 +47,8 @@ lazy_static! {
         .map(|p| Regex::new(p).expect("invalid regex"))
         .collect();
     static ref ENV_PREFIX: Regex =
-        Regex::new(r#"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]*)\s+)+"#).unwrap();
+        Regex::new(r#"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]*)\s+)+"#)
+            .unwrap();
     static ref PURE_ASSIGNMENT: Regex =
         Regex::new(r#"^(?:[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]*)\s*)+$"#).unwrap();
 }
@@ -1928,10 +1929,7 @@ mod tests {
     #[test]
     fn test_inline_path_prefix_rewrite() {
         assert_eq!(
-            rewrite_command(
-                r#"PATH="/c/Program Files/nodejs:$PATH" npm run build"#,
-                &[],
-            ),
+            rewrite_command(r#"PATH="/c/Program Files/nodejs:$PATH" npm run build"#, &[],),
             Some(r#"PATH="/c/Program Files/nodejs:$PATH" rtk npm run build"#.into())
         );
     }

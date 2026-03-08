@@ -117,7 +117,13 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
         savings_pct: 80.0,
-        subcmd_savings: &[("test", 90.0), ("check", 80.0), ("tree", 40.0), ("doc", 30.0), ("bench", 50.0)],
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("check", 80.0),
+            ("tree", 40.0),
+            ("doc", 30.0),
+            ("bench", 50.0),
+        ],
         subcmd_status: &[
             ("fmt", RtkStatus::Passthrough),
             ("tree", RtkStatus::Passthrough),
@@ -135,7 +141,12 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
         savings_pct: 80.0,
-        subcmd_savings: &[("build", 40.0), ("exec", 35.0), ("run", 40.0), ("typecheck", 50.0)],
+        subcmd_savings: &[
+            ("build", 40.0),
+            ("exec", 35.0),
+            ("run", 40.0),
+            ("typecheck", 50.0),
+        ],
         subcmd_status: &[
             ("build", RtkStatus::Passthrough),
             ("exec", RtkStatus::Passthrough),
@@ -381,7 +392,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["go"],
         category: "Go",
         savings_pct: 85.0,
-        subcmd_savings: &[("test", 90.0), ("build", 80.0), ("vet", 75.0), ("mod", 35.0), ("tool", 30.0), ("doc", 40.0), ("list", 40.0)],
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("build", 80.0),
+            ("vet", 75.0),
+            ("mod", 35.0),
+            ("tool", 30.0),
+            ("doc", 40.0),
+            ("list", 40.0),
+        ],
         subcmd_status: &[
             ("mod", RtkStatus::Passthrough),
             ("tool", RtkStatus::Passthrough),
@@ -537,6 +556,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
-    "env", "printenv", "whoami", "hostname", "date", "id", "uname",
+    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done", "env", "printenv",
+    "whoami", "hostname", "date", "id", "uname",
 ];
