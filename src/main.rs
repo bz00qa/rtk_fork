@@ -6,6 +6,7 @@ mod config;
 mod container;
 mod context_cmd;
 mod curl_cmd;
+mod dedup;
 mod deps;
 mod diff_cmd;
 mod discover;
@@ -288,6 +289,13 @@ enum Commands {
         /// Max recent commits to show
         #[arg(short = 'n', long, default_value = "5")]
         log_count: usize,
+    },
+
+    /// Collapse repeated/noisy lines in command output (pipe or run)
+    Dedup {
+        /// Command to run and deduplicate (omit to read from stdin)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
@@ -1410,6 +1418,38 @@ fn main() -> Result<()> {
             context_cmd::run(log_count, cli.verbose)?;
         }
 
+        Commands::Dedup { command } => {
+            let output = if command.is_empty() {
+                // Read from stdin
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .lock()
+                    .read_to_string(&mut buf)
+                    .context("Failed to read stdin")?;
+                buf
+            } else {
+                // Run command and capture output
+                let cmd_str = command.join(" ");
+                let result = if cfg!(target_os = "windows") {
+                    std::process::Command::new("cmd")
+                        .args(["/C", &cmd_str])
+                        .output()
+                } else {
+                    std::process::Command::new("sh")
+                        .args(["-c", &cmd_str])
+                        .output()
+                }
+                .context("Failed to execute command")?;
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                format!("{}{}", stdout, stderr)
+            };
+            let deduped = dedup::dedup_output(&output);
+            let deduped = dedup::dedup_identical(&deduped);
+            println!("{}", deduped);
+        }
+
         Commands::Grep {
             pattern,
             path,
@@ -1942,6 +1982,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
             | Commands::Context { .. }
+            | Commands::Dedup { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
