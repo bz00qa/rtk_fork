@@ -271,6 +271,18 @@ fn is_blob_show_arg(arg: &str) -> bool {
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+    let raw_line_count = diff.lines().count();
+
+    // Auto stat-only for very large diffs (>1000 raw lines)
+    // The stat summary is already printed by run_diff; just return a note
+    if raw_line_count > 1000 {
+        let file_count = diff.lines().filter(|l| l.starts_with("diff --git")).count();
+        return format!(
+            "(large diff: {} files, {} lines — showing stat only)",
+            file_count, raw_line_count
+        );
+    }
+
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -289,6 +301,10 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             result.push(format!("\n📄 {}", current_file));
             added = 0;
             removed = 0;
+            in_hunk = false;
+        } else if line.starts_with("Binary files") {
+            // Skip binary file content
+            result.push("  (binary file)".to_string());
             in_hunk = false;
         } else if line.starts_with("@@") {
             // New hunk
@@ -309,13 +325,9 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                     result.push(format!("  {}", line));
                     hunk_lines += 1;
                 }
-            } else if hunk_lines < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_lines > 0 {
-                    result.push(format!("  {}", line));
-                    hunk_lines += 1;
-                }
             }
+            // Skip context lines entirely — only show +/- changes
+            // This is the "smarter" part: context is noise for LLMs
 
             if hunk_lines == max_hunk_lines {
                 result.push("  ... (truncated)".to_string());
@@ -1480,6 +1492,60 @@ mod tests {
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_large_auto_stat() {
+        // Build a diff with >1000 lines — should trigger auto stat-only
+        let mut diff = String::new();
+        for f in 1..=20 {
+            diff.push_str(&format!("diff --git a/file{f}.rs b/file{f}.rs\n--- a/file{f}.rs\n+++ b/file{f}.rs\n@@ -1,50 +1,50 @@\n"));
+            for i in 1..=50 {
+                diff.push_str(&format!("+line{f}_{i}\n"));
+            }
+        }
+        assert!(diff.lines().count() > 1000);
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("large diff"),
+            "Should auto-switch to stat-only for >1000 line diffs"
+        );
+        assert!(result.contains("20 files"));
+    }
+
+    #[test]
+    fn test_compact_diff_binary_file() {
+        let diff =
+            "diff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n";
+        let result = compact_diff(diff, 100);
+        assert!(result.contains("image.png"));
+        assert!(result.contains("(binary file)"));
+    }
+
+    #[test]
+    fn test_compact_diff_no_context_lines() {
+        let diff = r#"diff --git a/foo.rs b/foo.rs
+--- a/foo.rs
++++ b/foo.rs
+@@ -1,5 +1,6 @@
+ use std::io;
+ fn main() {
++    println!("hello");
+     let x = 1;
+ }
+"#;
+        let result = compact_diff(diff, 100);
+        // Changed line should appear
+        assert!(result.contains(r#"+    println!("hello");"#));
+        // Context lines should NOT appear (smarter diff)
+        assert!(
+            !result.contains("use std::io"),
+            "Context lines should be stripped"
+        );
+        assert!(
+            !result.contains(" fn main()"),
+            "Context lines should be stripped"
         );
     }
 
