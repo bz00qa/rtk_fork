@@ -2245,6 +2245,60 @@ mod tests {
     // --- Cargo extended subcommands ---
 
     #[test]
+    fn test_classify_go_version_ignored() {
+        assert_eq!(classify_command("go version"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_taskkill_uppercase_ignored() {
+        assert_eq!(
+            classify_command("TASKKILL //F //IM server.exe"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_pnpm_store() {
+        assert!(matches!(
+            classify_command("pnpm store prune"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                status: RtkStatus::Passthrough,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_npm_root_ignored() {
+        assert_eq!(classify_command("npm root -g"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_node_check_ignored() {
+        assert_eq!(
+            classify_command("node --check src/main.js"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_python_version_ignored() {
+        assert_eq!(
+            classify_command("python --version 2>/dev/null"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_rustc_ignored() {
+        assert_eq!(
+            classify_command("rustc --explain E0255"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
     fn test_classify_cargo_tree() {
         assert!(matches!(
             classify_command("cargo tree"),

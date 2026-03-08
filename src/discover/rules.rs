@@ -16,7 +16,7 @@ pub const PATTERNS: &[&str] = &[
     r"^git\s+(?:-C\s+\S+\s+)?(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|merge|rebase|reset|tag|remote|clone|init|mv|rm|restore|switch|revert|clean|bisect|blame|cherry-pick|reflog|config|submodule|ls-files|rev-parse|check-ignore|describe|shortlog|grep|archive|notes|gc|rev-list|for-each-ref|ls-remote|ls-tree|name-rev|symbolic-ref|update-ref|am|format-patch|subtree)",
     r"^gh\s+(pr|issue|run|repo|api|release)",
     r"^cargo\s+(build|test|clippy|check|fmt|install|tree|doc|bench|clean|update|publish|add|remove)",
-    r"^pnpm\s+(?:(?:--filter|-F)\s+\S+\s+|(?:--recursive|-r|-w|--workspace-root)\s+)*(list|ls|outdated|install|build|exec|run|typecheck|test|dev|start|add|remove|update|dlx|create|why|audit|publish|link)",
+    r"^pnpm\s+(?:(?:--filter|-F)\s+\S+\s+|(?:--recursive|-r|-w|--workspace-root)\s+)*(list|ls|outdated|install|build|exec|run|typecheck|test|dev|start|add|remove|update|dlx|create|why|audit|publish|link|store)",
     r"^npm\s+(run|exec|test|install|ci|start|build|publish|pack|link|unlink|update|outdated|ls|list|audit|fund|why|cache|config|init|version|view|info|search|deprecate)",
     r"^npx\s+",
     r"^(cat|head|tail)\s+",
@@ -153,6 +153,7 @@ pub const RULES: &[RtkRule] = &[
             ("audit", RtkStatus::Passthrough),
             ("publish", RtkStatus::Passthrough),
             ("link", RtkStatus::Passthrough),
+            ("store", RtkStatus::Passthrough),
         ],
     },
     RtkRule {
@@ -483,6 +484,7 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "python ../",
     // Node (not npm/npx commands)
     "node -p",
+    "node --check",
     "node ./",
     "node .",
     // Windows system commands
@@ -509,9 +511,17 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     // Trivial commands
     "tasklist",
     "taskkill",
+    "TASKLIST",
+    "TASKKILL",
     "cmp ",
     "timeout",
     "tee ",
+    // Version checks (trivial output)
+    "go version",
+    "python --version",
+    "python3 --version",
+    "rustc --",
+    "npm root",
     // Unix utilities
     "xxd",
     "file ",
