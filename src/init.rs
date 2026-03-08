@@ -659,18 +659,34 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 #[cfg(not(unix))]
 fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
     if !global {
+        // Local init: full injection into ./CLAUDE.md (no hook)
         return run_claude_md_mode(false, verbose);
     }
 
-    // On Windows, use the native `rtk hook-rewrite` command (no bash/jq needed)
+    let claude_dir = resolve_claude_dir()?;
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+
+    // 1. Write slim RTK.md (30 lines vs 133-line full block)
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 2. Patch CLAUDE.md (add @RTK.md, migrate old block if present)
+    let migrated = patch_claude_md(&claude_md_path, verbose)?;
+
+    // 3. Patch settings.json with native hook
     let hook_command = "rtk hook-rewrite";
-
-    // 1. Patch CLAUDE.md with RTK instructions
-    run_claude_md_mode(true, verbose)?;
-
-    // 2. Patch settings.json with native hook
     let dummy_path = std::path::PathBuf::from(hook_command);
     let patch_result = patch_settings_json(&dummy_path, patch_mode, verbose)?;
+
+    // 4. Print summary
+    println!("\nRTK init complete (global).\n");
+    println!("  RTK.md:    {} (slim, 30 lines)", rtk_md_path.display());
+    println!("  CLAUDE.md: @RTK.md reference added");
+
+    if migrated {
+        println!("\n  Migrated: removed 133-line RTK block from CLAUDE.md");
+        println!("            replaced with @RTK.md (30 lines)");
+    }
 
     match patch_result {
         PatchResult::Patched => {}
