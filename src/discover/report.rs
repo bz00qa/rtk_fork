@@ -41,6 +41,15 @@ pub struct UnsupportedEntry {
     pub example: String,
 }
 
+/// A detected usage pattern that could benefit from RTK meta-commands.
+#[derive(Debug, Serialize)]
+pub struct PatternOpportunity {
+    pub pattern: String,
+    pub suggestion: String,
+    pub occurrences: usize,
+    pub estimated_savings_tokens: usize,
+}
+
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
@@ -50,6 +59,7 @@ pub struct DiscoverReport {
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
+    pub patterns: Vec<PatternOpportunity>,
     pub parse_errors: usize,
 }
 
@@ -144,6 +154,26 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str(&"-".repeat(52));
         out.push('\n');
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
+    }
+
+    // Pattern opportunities
+    if !report.patterns.is_empty() {
+        out.push_str("\nPATTERN OPPORTUNITIES -- use RTK meta-commands\n");
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+
+        for p in &report.patterns {
+            out.push_str(&format!(
+                "  {} ({}x) → {}\n    Est. savings: ~{}\n",
+                p.pattern,
+                p.occurrences,
+                p.suggestion,
+                format_tokens(p.estimated_savings_tokens),
+            ));
+        }
+
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
     }
 
     out.push_str("\n~estimated from tool_result output sizes\n");

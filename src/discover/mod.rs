@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{category_avg_tokens, classify_command, split_command_chain, Classification};
-use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+use report::{DiscoverReport, PatternOpportunity, SupportedEntry, UnsupportedEntry};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -145,6 +145,9 @@ pub fn run(
         }
     }
 
+    // Detect patterns across sessions
+    let patterns = detect_patterns(&sessions, &provider, verbose);
+
     // Build report
     let mut supported: Vec<SupportedEntry> = supported_map
         .into_values()
@@ -205,6 +208,7 @@ pub fn run(
         since_days,
         supported,
         unsupported,
+        patterns,
         parse_errors,
     };
 
@@ -214,6 +218,171 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Detect usage patterns that could benefit from RTK meta-commands.
+///
+/// Patterns detected:
+/// 1. Sequential git status+diff+log → rtk context
+/// 2. Same command repeated 3+ times → rtk watch
+/// 3. Commands with large output (>2K chars) → rtk dedup
+fn detect_patterns(
+    sessions: &[std::path::PathBuf],
+    provider: &ClaudeProvider,
+    verbose: u8,
+) -> Vec<PatternOpportunity> {
+    let mut context_count = 0usize;
+    let mut watch_candidates: HashMap<String, usize> = HashMap::new();
+    let mut dedup_candidates: HashMap<String, (usize, usize)> = HashMap::new(); // cmd -> (count, total_output)
+
+    for session_path in sessions {
+        let extracted = match provider.extract_commands(session_path) {
+            Ok(cmds) => cmds,
+            Err(_) => continue,
+        };
+
+        // Sort by sequence index
+        let mut cmds = extracted;
+        cmds.sort_by_key(|c| c.sequence_index);
+
+        // Detect context pattern: git status near git diff near git log
+        let git_cmds: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| {
+                let t = c.command.trim();
+                if t.starts_with("git status")
+                    || t.starts_with("rtk git status")
+                    || t.starts_with("git diff")
+                    || t.starts_with("rtk git diff")
+                    || t.starts_with("git log")
+                    || t.starts_with("rtk git log")
+                {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Count windows of 3 where we see status+diff+log
+        for window in git_cmds.windows(3) {
+            let has_status = window.iter().any(|c| c.contains("status"));
+            let has_diff = window.iter().any(|c| c.contains("diff"));
+            let has_log = window.iter().any(|c| c.contains("log"));
+            if has_status && has_diff && has_log {
+                context_count += 1;
+            }
+        }
+
+        // Detect watch pattern: same command base repeated
+        let mut cmd_runs: HashMap<String, usize> = HashMap::new();
+        for cmd in &cmds {
+            if let Some(base) = normalize_cmd_base(&cmd.command) {
+                *cmd_runs.entry(base).or_insert(0) += 1;
+            }
+        }
+        for (base, count) in cmd_runs {
+            if count >= 3 {
+                *watch_candidates.entry(base).or_insert(0) += count;
+            }
+        }
+
+        // Detect dedup pattern: commands with large output
+        for cmd in &cmds {
+            if let Some(len) = cmd.output_len {
+                if len > 2000 {
+                    if let Some(base) = normalize_cmd_base(&cmd.command) {
+                        let entry = dedup_candidates.entry(base).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 += len;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut patterns = Vec::new();
+
+    if context_count > 0 {
+        // Estimate: each context pattern saves ~3 round-trips × ~200 tokens overhead
+        patterns.push(PatternOpportunity {
+            pattern: "git status + diff + log sequence".to_string(),
+            suggestion: "rtk context".to_string(),
+            occurrences: context_count,
+            estimated_savings_tokens: context_count * 600,
+        });
+    }
+
+    // Top watch candidates
+    let mut watch_vec: Vec<_> = watch_candidates.into_iter().collect();
+    watch_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    for (cmd, count) in watch_vec.into_iter().take(5) {
+        // Estimate: repeated runs with identical output → 90% savings on 2nd+ runs
+        let est_savings = (count - count / 3) * 150; // ~150 tokens per avoided repeat
+        patterns.push(PatternOpportunity {
+            pattern: format!("{} repeated", cmd),
+            suggestion: format!("rtk watch {}", cmd),
+            occurrences: count,
+            estimated_savings_tokens: est_savings,
+        });
+    }
+
+    // Top dedup candidates
+    let mut dedup_vec: Vec<_> = dedup_candidates.into_iter().collect();
+    dedup_vec.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    for (cmd, (count, total_bytes)) in dedup_vec.into_iter().take(5) {
+        if count >= 2 {
+            // Estimate: dedup saves ~30% of large outputs
+            let est_savings = total_bytes / 4 * 30 / 100; // bytes→tokens × 30%
+            patterns.push(PatternOpportunity {
+                pattern: format!("{} (large output)", cmd),
+                suggestion: format!("rtk dedup {}", cmd),
+                occurrences: count,
+                estimated_savings_tokens: est_savings,
+            });
+        }
+    }
+
+    if verbose > 0 && !patterns.is_empty() {
+        eprintln!("Detected {} usage patterns", patterns.len());
+    }
+
+    patterns
+}
+
+/// Commands not meaningful for watch/dedup pattern detection
+const PATTERN_SKIP_PREFIXES: &[&str] = &[
+    "cd ", "cd\t", "ls", "echo ", "cat ", "pwd", "mkdir ", "rm ", "cp ", "mv ", "touch ", "chmod ",
+    "export ", "source ", ".", "PATH=", "SKIP_ENV", "set ", "unset ", "head ", "tail ", "wc ",
+    "which ", "where ", "type ",
+];
+
+/// Normalize a command to its base form for comparison.
+/// "cargo test -- --nocapture" → "cargo test"
+/// "rtk cargo test" → "cargo test"
+/// Returns None for commands not meaningful for pattern detection.
+fn normalize_cmd_base(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+
+    // Skip non-meaningful commands
+    for prefix in PATTERN_SKIP_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            return None;
+        }
+    }
+
+    // Skip pure env assignments
+    if trimmed.contains('=') && !trimmed.contains(' ') {
+        return None;
+    }
+
+    let stripped = trimmed.strip_prefix("rtk ").unwrap_or(trimmed);
+    let parts: Vec<&str> = stripped.splitn(3, char::is_whitespace).collect();
+    match parts.len() {
+        0 => None,
+        1 => Some(parts[0].to_string()),
+        _ => Some(format!("{} {}", parts[0], parts[1])),
+    }
 }
 
 /// Extract the subcommand from a command string (second word).

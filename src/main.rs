@@ -1431,7 +1431,8 @@ fn main() -> Result<()> {
         }
 
         Commands::Dedup { command } => {
-            let output = if command.is_empty() {
+            let timer = tracking::TimedExecution::start();
+            let (raw_cmd, output) = if command.is_empty() {
                 // Read from stdin
                 use std::io::Read;
                 let mut buf = String::new();
@@ -1439,7 +1440,7 @@ fn main() -> Result<()> {
                     .lock()
                     .read_to_string(&mut buf)
                     .context("Failed to read stdin")?;
-                buf
+                ("(stdin)".to_string(), buf)
             } else {
                 // Run command and capture output
                 let cmd_str = command.join(" ");
@@ -1455,11 +1456,12 @@ fn main() -> Result<()> {
                 .context("Failed to execute command")?;
                 let stdout = String::from_utf8_lossy(&result.stdout);
                 let stderr = String::from_utf8_lossy(&result.stderr);
-                format!("{}{}", stdout, stderr)
+                (cmd_str, format!("{}{}", stdout, stderr))
             };
             let deduped = dedup::dedup_output(&output);
             let deduped = dedup::dedup_identical(&deduped);
             println!("{}", deduped);
+            timer.track(&raw_cmd, "rtk dedup", &output, &deduped);
         }
 
         Commands::Watch { command } => {
