@@ -1,3 +1,4 @@
+mod auto_filter;
 mod aws_cmd;
 mod cargo_cmd;
 mod cc_economics;
@@ -92,51 +93,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List directory contents with token-optimized output (proxy to native ls)
-    Ls {
-        /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Directory tree with token-optimized output (proxy to native tree)
-    Tree {
-        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Read file with intelligent filtering
-    Read {
-        /// File to read
-        file: PathBuf,
-        /// Filter: none, minimal, aggressive
-        #[arg(short, long, default_value = "minimal")]
-        level: filter::FilterLevel,
-        /// Max lines
-        #[arg(short, long)]
-        max_lines: Option<usize>,
-        /// Show line numbers
-        #[arg(short = 'n', long)]
-        line_numbers: bool,
-        /// Markdown diet mode: strip examples, collapse tables, remove verbose sections
-        #[arg(short, long)]
-        diet: bool,
-    },
-
-    /// Generate 2-line technical summary (heuristic-based)
-    Smart {
-        /// File to analyze
-        file: PathBuf,
-        /// Model: heuristic
-        #[arg(short, long, default_value = "heuristic")]
-        model: String,
-        /// Force model download
-        #[arg(long)]
-        force_download: bool,
-    },
-
+    // ── Git & VCS ───────────────────────────────────────────
     /// Git commands with compact output
+    #[command(display_order = 10)]
     Git {
         /// Change to directory before executing (like git -C <path>, can be repeated)
         #[arg(short = 'C', action = clap::ArgAction::Append)]
@@ -175,6 +134,7 @@ enum Commands {
     },
 
     /// GitHub CLI (gh) commands with token-optimized output
+    #[command(display_order = 11)]
     Gh {
         /// Subcommand: pr, issue, run, repo
         subcommand: String,
@@ -183,134 +143,210 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// AWS CLI with compact output (force JSON, compress)
-    Aws {
-        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
-        subcommand: String,
-        /// Additional arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// PostgreSQL client with compact output (strip borders, compress tables)
-    Psql {
-        /// psql arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// pnpm commands with ultra-compact output
-    Pnpm {
+    /// Graphite (gt) stacked PR commands with compact output
+    #[command(display_order = 12)]
+    Gt {
         #[command(subcommand)]
-        command: PnpmCommands,
+        command: GtCommands,
     },
 
-    /// Run command and show only errors/warnings
-    Err {
-        /// Command to run
+    // ── Build & Compile ─────────────────────────────────────
+    /// Cargo commands with compact output
+    #[command(display_order = 20)]
+    Cargo {
+        #[command(subcommand)]
+        command: CargoCommands,
+    },
+
+    /// TypeScript compiler with grouped error output
+    #[command(display_order = 21)]
+    Tsc {
+        /// TypeScript compiler arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
+        args: Vec<String>,
     },
 
-    /// Run tests and show only failures
+    /// Next.js build with compact output
+    #[command(display_order = 22)]
+    Next {
+        /// Next.js build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ESLint with grouped rule violations
+    #[command(display_order = 23)]
+    Lint {
+        /// Linter arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Prettier format checker with compact output
+    #[command(display_order = 24)]
+    Prettier {
+        /// Prettier arguments (e.g., --check, --write)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Universal format checker (prettier, black, ruff format)
+    #[command(display_order = 25)]
+    Format {
+        /// Formatter arguments (auto-detects formatter from project files)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Test ─────────────────────────────────────────────────
+    /// Run tests and show only failures (generic)
+    #[command(display_order = 30)]
     Test {
         /// Test command (e.g. cargo test)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
-    /// Show JSON structure without values
-    Json {
-        /// JSON file
+    /// Vitest commands with compact output
+    #[command(display_order = 31)]
+    Vitest {
+        #[command(subcommand)]
+        command: VitestCommands,
+    },
+
+    /// Playwright E2E tests with compact output
+    #[command(display_order = 32)]
+    Playwright {
+        /// Playwright arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pytest test runner with compact output
+    #[command(display_order = 33)]
+    Pytest {
+        /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Languages ────────────────────────────────────────────
+    /// Go commands with compact output
+    #[command(display_order = 40)]
+    Go {
+        #[command(subcommand)]
+        command: GoCommands,
+    },
+
+    /// golangci-lint with compact output
+    #[command(name = "golangci-lint", display_order = 41)]
+    GolangciLint {
+        /// golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ruff linter/formatter with compact output
+    #[command(display_order = 42)]
+    Ruff {
+        /// Ruff arguments (e.g., check, format --check)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Mypy type checker with grouped error output
+    #[command(display_order = 43)]
+    Mypy {
+        /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pip package manager with compact output (auto-detects uv)
+    #[command(display_order = 44)]
+    Pip {
+        /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Package Managers ─────────────────────────────────────
+    /// pnpm commands with ultra-compact output
+    #[command(display_order = 50)]
+    Pnpm {
+        #[command(subcommand)]
+        command: PnpmCommands,
+    },
+
+    /// npm run with filtered output (strip boilerplate)
+    #[command(display_order = 51)]
+    Npm {
+        /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
+    #[command(display_order = 52)]
+    Npx {
+        /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Prisma commands with compact output (no ASCII art)
+    #[command(display_order = 53)]
+    Prisma {
+        #[command(subcommand)]
+        command: PrismaCommands,
+    },
+
+    // ── Files & Search ───────────────────────────────────────
+    /// List directory contents with token-optimized output
+    #[command(display_order = 60)]
+    Ls {
+        /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Directory tree with token-optimized output
+    #[command(display_order = 61)]
+    Tree {
+        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Read file with intelligent filtering
+    #[command(display_order = 62)]
+    Read {
+        /// File to read
         file: PathBuf,
-        /// Max depth
-        #[arg(short, long, default_value = "5")]
-        depth: usize,
-    },
-
-    /// Summarize project dependencies
-    Deps {
-        /// Project path
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-
-    /// Show environment variables (filtered, sensitive masked)
-    Env {
-        /// Filter by name (e.g. PATH, AWS)
+        /// Filter: none, minimal, aggressive
+        #[arg(short, long, default_value = "minimal")]
+        level: filter::FilterLevel,
+        /// Max lines
         #[arg(short, long)]
-        filter: Option<String>,
-        /// Show all (include sensitive)
-        #[arg(long)]
-        show_all: bool,
+        max_lines: Option<usize>,
+        /// Show line numbers
+        #[arg(short = 'n', long)]
+        line_numbers: bool,
+        /// Markdown diet mode: strip examples, collapse tables, remove verbose sections
+        #[arg(short, long)]
+        diet: bool,
     },
 
-    /// Find files with compact tree output (accepts native find flags like -name, -type)
+    /// Find files with compact tree output (accepts native find flags)
+    #[command(display_order = 63)]
     Find {
         /// All find arguments (supports both RTK and native find syntax)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
 
-    /// Ultra-condensed diff (only changed lines)
-    Diff {
-        /// First file or - for stdin (unified diff)
-        file1: PathBuf,
-        /// Second file (optional if stdin)
-        file2: Option<PathBuf>,
-    },
-
-    /// Filter and deduplicate log output
-    Log {
-        /// Log file (omit for stdin)
-        file: Option<PathBuf>,
-    },
-
-    /// Docker commands with compact output
-    Docker {
-        #[command(subcommand)]
-        command: DockerCommands,
-    },
-
-    /// Kubectl commands with compact output
-    Kubectl {
-        #[command(subcommand)]
-        command: KubectlCommands,
-    },
-
-    /// Run command and show heuristic summary
-    Summary {
-        /// Command to run and summarize
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Combined git context: status + diff + log in one call
-    Context {
-        /// Max recent commits to show
-        #[arg(short = 'n', long, default_value = "5")]
-        log_count: usize,
-    },
-
-    /// Collapse repeated/noisy lines in command output (pipe or run)
-    Dedup {
-        /// Command to run and deduplicate (omit to read from stdin)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Run command and show only changes since last run (iterative dev)
-    Watch {
-        /// Command to run and diff against previous output
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
-        command: Vec<String>,
-    },
-
-    /// Clear watch cache (reset diff history)
-    #[command(name = "watch-clear")]
-    WatchClear,
-
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(display_order = 64)]
     Grep {
         /// Pattern to search
         pattern: String,
@@ -337,38 +373,132 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Initialize rtk instructions in CLAUDE.md
-    Init {
-        /// Add to global ~/.claude/CLAUDE.md instead of local
+    /// Ultra-condensed diff (only changed lines)
+    #[command(display_order = 65)]
+    Diff {
+        /// First file or - for stdin (unified diff)
+        file1: PathBuf,
+        /// Second file (optional if stdin)
+        file2: Option<PathBuf>,
+    },
+
+    /// Word/line/byte count with compact output (strips paths and padding)
+    #[command(display_order = 66)]
+    Wc {
+        /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Analysis & Debug ─────────────────────────────────────
+    /// Run command and show only errors/warnings
+    #[command(display_order = 70)]
+    Err {
+        /// Command to run
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Show JSON structure without values
+    #[command(display_order = 71)]
+    Json {
+        /// JSON file
+        file: PathBuf,
+        /// Max depth
+        #[arg(short, long, default_value = "5")]
+        depth: usize,
+    },
+
+    /// Summarize project dependencies
+    #[command(display_order = 72)]
+    Deps {
+        /// Project path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Show environment variables (filtered, sensitive masked)
+    #[command(display_order = 73)]
+    Env {
+        /// Filter by name (e.g. PATH, AWS)
         #[arg(short, long)]
-        global: bool,
-
-        /// Show current configuration
+        filter: Option<String>,
+        /// Show all (include sensitive)
         #[arg(long)]
-        show: bool,
+        show_all: bool,
+    },
 
-        /// Inject full instructions into CLAUDE.md (legacy mode)
-        #[arg(long = "claude-md", group = "mode")]
-        claude_md: bool,
+    /// Filter and deduplicate log output
+    #[command(display_order = 74)]
+    Log {
+        /// Log file (omit for stdin)
+        file: Option<PathBuf>,
+    },
 
-        /// Hook only, no RTK.md
-        #[arg(long = "hook-only", group = "mode")]
-        hook_only: bool,
+    /// Run command and show heuristic summary
+    #[command(display_order = 75)]
+    Summary {
+        /// Command to run and summarize
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 
-        /// Auto-patch settings.json without prompting
-        #[arg(long = "auto-patch", group = "patch")]
-        auto_patch: bool,
-
-        /// Skip settings.json patching (print manual instructions)
-        #[arg(long = "no-patch", group = "patch")]
-        no_patch: bool,
-
-        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+    /// Generate 2-line technical summary (heuristic-based)
+    #[command(display_order = 76)]
+    Smart {
+        /// File to analyze
+        file: PathBuf,
+        /// Model: heuristic
+        #[arg(short, long, default_value = "heuristic")]
+        model: String,
+        /// Force model download
         #[arg(long)]
-        uninstall: bool,
+        force_download: bool,
+    },
+
+    // ── Infrastructure ───────────────────────────────────────
+    /// Docker commands with compact output
+    #[command(display_order = 80)]
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommands,
+    },
+
+    /// Kubectl commands with compact output
+    #[command(display_order = 81)]
+    Kubectl {
+        #[command(subcommand)]
+        command: KubectlCommands,
+    },
+
+    /// AWS CLI with compact output (force JSON, compress)
+    #[command(display_order = 82)]
+    Aws {
+        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PostgreSQL client with compact output (strip borders, compress tables)
+    #[command(display_order = 83)]
+    Psql {
+        /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Curl with auto-JSON detection and schema output
+    #[command(display_order = 84)]
+    Curl {
+        /// Curl arguments (URL + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Download with compact output (strips progress bars)
+    #[command(display_order = 85)]
     Wget {
         /// URL to download
         url: String,
@@ -380,16 +510,51 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Word/line/byte count with compact output (strips paths and padding)
-    Wc {
-        /// Arguments passed to wc (files, flags like -l, -w, -c)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+    // ── Meta Commands ────────────────────────────────────────
+    /// Combined git context: status + diff + log in one call
+    #[command(display_order = 90)]
+    Context {
+        /// Max recent commits to show
+        #[arg(short = 'n', long, default_value = "5")]
+        log_count: usize,
     },
 
+    /// Collapse repeated/noisy lines in command output (pipe or run)
+    #[command(display_order = 91)]
+    Dedup {
+        /// Command to run and deduplicate (omit to read from stdin)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Run command and show only changes since last run (iterative dev)
+    #[command(display_order = 92)]
+    Watch {
+        /// Command to run and diff against previous output
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Clear watch cache (reset diff history)
+    #[command(name = "watch-clear", display_order = 93)]
+    WatchClear,
+
+    /// Execute command with auto noise reduction (ANSI strip, dedup, truncate)
+    #[command(display_order = 94)]
+    Proxy {
+        /// Apply auto noise reduction (ANSI strip, dedup, truncate)
+        #[arg(short = 'f', long)]
+        filter: bool,
+        /// Command and arguments to execute
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+
+    // ── Stats & Config ───────────────────────────────────────
     /// Show token savings summary and history
+    #[command(display_order = 100)]
     Gain {
-        /// Filter statistics to current project (current working directory) // added
+        /// Filter statistics to current project (current working directory)
         #[arg(short, long)]
         project: bool,
         /// Show ASCII graph of daily savings
@@ -424,114 +589,8 @@ enum Commands {
         failures: bool,
     },
 
-    /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
-    CcEconomics {
-        /// Show detailed daily breakdown
-        #[arg(short, long)]
-        daily: bool,
-        /// Show weekly breakdown
-        #[arg(short, long)]
-        weekly: bool,
-        /// Show monthly breakdown
-        #[arg(short, long)]
-        monthly: bool,
-        /// Show all time breakdowns (daily + weekly + monthly)
-        #[arg(short, long)]
-        all: bool,
-        /// Output format: text, json, csv
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
-
-    /// Show or create configuration file
-    Config {
-        /// Create default config file
-        #[arg(long)]
-        create: bool,
-    },
-
-    /// Vitest commands with compact output
-    Vitest {
-        #[command(subcommand)]
-        command: VitestCommands,
-    },
-
-    /// Prisma commands with compact output (no ASCII art)
-    Prisma {
-        #[command(subcommand)]
-        command: PrismaCommands,
-    },
-
-    /// TypeScript compiler with grouped error output
-    Tsc {
-        /// TypeScript compiler arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Next.js build with compact output
-    Next {
-        /// Next.js build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// ESLint with grouped rule violations
-    Lint {
-        /// Linter arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Prettier format checker with compact output
-    Prettier {
-        /// Prettier arguments (e.g., --check, --write)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Universal format checker (prettier, black, ruff format)
-    Format {
-        /// Formatter arguments (auto-detects formatter from project files)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Playwright E2E tests with compact output
-    Playwright {
-        /// Playwright arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Cargo commands with compact output
-    Cargo {
-        #[command(subcommand)]
-        command: CargoCommands,
-    },
-
-    /// npm run with filtered output (strip boilerplate)
-    Npm {
-        /// npm run arguments (script name + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
-    Npx {
-        /// npx arguments (command + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Curl with auto-JSON detection and schema output
-    Curl {
-        /// Curl arguments (URL + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Discover missed RTK savings from Claude Code history
+    #[command(display_order = 101)]
     Discover {
         /// Filter by project path (substring match)
         #[arg(short, long)]
@@ -550,7 +609,68 @@ enum Commands {
         format: String,
     },
 
+    /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
+    #[command(display_order = 102)]
+    CcEconomics {
+        /// Show detailed daily breakdown
+        #[arg(short, long)]
+        daily: bool,
+        /// Show weekly breakdown
+        #[arg(short, long)]
+        weekly: bool,
+        /// Show monthly breakdown
+        #[arg(short, long)]
+        monthly: bool,
+        /// Show all time breakdowns (daily + weekly + monthly)
+        #[arg(short, long)]
+        all: bool,
+        /// Output format: text, json, csv
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Initialize rtk instructions in CLAUDE.md
+    #[command(display_order = 103)]
+    Init {
+        /// Add to global ~/.claude/CLAUDE.md instead of local
+        #[arg(short, long)]
+        global: bool,
+
+        /// Show current configuration
+        #[arg(long)]
+        show: bool,
+
+        /// Inject full instructions into CLAUDE.md (legacy mode)
+        #[arg(long = "claude-md", group = "mode")]
+        claude_md: bool,
+
+        /// Hook only, no RTK.md
+        #[arg(long = "hook-only", group = "mode")]
+        hook_only: bool,
+
+        /// Auto-patch settings.json without prompting
+        #[arg(long = "auto-patch", group = "patch")]
+        auto_patch: bool,
+
+        /// Skip settings.json patching (print manual instructions)
+        #[arg(long = "no-patch", group = "patch")]
+        no_patch: bool,
+
+        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+        #[arg(long)]
+        uninstall: bool,
+    },
+
+    /// Show or create configuration file
+    #[command(display_order = 104)]
+    Config {
+        /// Create default config file
+        #[arg(long)]
+        create: bool,
+    },
+
     /// Learn CLI corrections from Claude Code error history
+    #[command(display_order = 105)]
     Learn {
         /// Filter by project path (substring match)
         #[arg(short, long)]
@@ -575,66 +695,13 @@ enum Commands {
         min_occurrences: usize,
     },
 
-    /// Execute command without filtering but track usage
-    Proxy {
-        /// Command and arguments to execute
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<OsString>,
-    },
-
+    // ── Internals ────────────────────────────────────────────
     /// Verify hook integrity (SHA-256 check)
+    #[command(display_order = 200)]
     Verify,
 
-    /// Ruff linter/formatter with compact output
-    Ruff {
-        /// Ruff arguments (e.g., check, format --check)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Pytest test runner with compact output
-    Pytest {
-        /// Pytest arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Mypy type checker with grouped error output
-    Mypy {
-        /// Mypy arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Pip package manager with compact output (auto-detects uv)
-    Pip {
-        /// Pip arguments (e.g., list, outdated, install)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Go commands with compact output
-    Go {
-        #[command(subcommand)]
-        command: GoCommands,
-    },
-
-    /// Graphite (gt) stacked PR commands with compact output
-    Gt {
-        #[command(subcommand)]
-        command: GtCommands,
-    },
-
-    /// golangci-lint with compact output
-    #[command(name = "golangci-lint")]
-    GolangciLint {
-        /// golangci-lint arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
-    #[command(name = "hook-audit")]
+    #[command(name = "hook-audit", display_order = 201)]
     HookAudit {
         /// Show entries from last N days (0 = all time)
         #[arg(short, long, default_value = "7")]
@@ -642,23 +709,14 @@ enum Commands {
     },
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
-    ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
-    ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
-    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    #[command(display_order = 202)]
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         cmd: String,
     },
 
     /// Native Claude Code PreToolUse hook (reads JSON from stdin, no jq needed)
-    ///
-    /// Cross-platform replacement for hooks/rtk-rewrite.sh.
-    /// Register in ~/.claude/settings.json:
-    ///   "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "rtk hook-rewrite" }] }] }
-    #[command(name = "hook-rewrite")]
+    #[command(name = "hook-rewrite", display_order = 203)]
     HookRewrite,
 }
 
@@ -1859,10 +1917,9 @@ fn main() -> Result<()> {
             hook_rewrite_cmd::run()?;
         }
 
-        Commands::Proxy { args } => {
-            use std::io::{Read, Write};
+        Commands::Proxy { filter, args } => {
+            use std::io::Read;
             use std::process::{Command, Stdio};
-            use std::thread;
 
             if args.is_empty() {
                 anyhow::bail!(
@@ -1879,89 +1936,118 @@ fn main() -> Result<()> {
                 .collect();
 
             if cli.verbose > 0 {
-                eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
+                eprintln!(
+                    "Proxy mode{}: {} {}",
+                    if filter { " (filtered)" } else { "" },
+                    cmd_name,
+                    cmd_args.join(" ")
+                );
             }
 
-            let mut child = Command::new(cmd_name.as_ref())
-                .args(&cmd_args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context(format!("Failed to execute command: {}", cmd_name))?;
+            if filter {
+                // Filtered mode: capture all output, apply auto_filter, then print
+                let child_output = Command::new(cmd_name.as_ref())
+                    .args(&cmd_args)
+                    .output()
+                    .context(format!("Failed to execute command: {}", cmd_name))?;
 
-            let stdout_pipe = child
-                .stdout
-                .take()
-                .context("Failed to capture child stdout")?;
-            let stderr_pipe = child
-                .stderr
-                .take()
-                .context("Failed to capture child stderr")?;
+                let stdout = String::from_utf8_lossy(&child_output.stdout);
+                let stderr = String::from_utf8_lossy(&child_output.stderr);
+                let full_output = format!("{}{}", stdout, stderr);
+                let success = child_output.status.success();
 
-            let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stdout_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
+                let (filtered, _) = auto_filter::filter_with_status(&full_output, success);
+                print!("{}", filtered);
 
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
-                    }
-                    captured.extend_from_slice(&buf[..count]);
-                    let mut out = std::io::stdout().lock();
-                    out.write_all(&buf[..count])?;
-                    out.flush()?;
+                timer.track(
+                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
+                    &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
+                    &full_output,
+                    &filtered,
+                );
+
+                if !success {
+                    std::process::exit(child_output.status.code().unwrap_or(1));
                 }
+            } else {
+                // Raw mode: stream output in real-time, track but don't filter
+                let mut child = Command::new(cmd_name.as_ref())
+                    .args(&cmd_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context(format!("Failed to execute command: {}", cmd_name))?;
 
-                Ok(captured)
-            });
+                let stdout_pipe = child
+                    .stdout
+                    .take()
+                    .context("Failed to capture child stdout")?;
+                let stderr_pipe = child
+                    .stderr
+                    .take()
+                    .context("Failed to capture child stderr")?;
 
-            let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stderr_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
-
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
+                let stdout_handle = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                    let mut reader = stdout_pipe;
+                    let mut captured = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        captured.extend_from_slice(&buf[..count]);
+                        use std::io::Write;
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(&buf[..count])?;
+                        out.flush()?;
                     }
-                    captured.extend_from_slice(&buf[..count]);
-                    let mut err = std::io::stderr().lock();
-                    err.write_all(&buf[..count])?;
-                    err.flush()?;
+                    Ok(captured)
+                });
+
+                let stderr_handle = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                    let mut reader = stderr_pipe;
+                    let mut captured = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        captured.extend_from_slice(&buf[..count]);
+                        use std::io::Write;
+                        let mut err = std::io::stderr().lock();
+                        err.write_all(&buf[..count])?;
+                        err.flush()?;
+                    }
+                    Ok(captured)
+                });
+
+                let status = child
+                    .wait()
+                    .context(format!("Failed waiting for command: {}", cmd_name))?;
+
+                let stdout_bytes = stdout_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
+                let stderr_bytes = stderr_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
+
+                let stdout = String::from_utf8_lossy(&stdout_bytes);
+                let stderr = String::from_utf8_lossy(&stderr_bytes);
+                let full_output = format!("{}{}", stdout, stderr);
+
+                timer.track(
+                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
+                    &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
+                    &full_output,
+                    &full_output,
+                );
+
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
                 }
-
-                Ok(captured)
-            });
-
-            let status = child
-                .wait()
-                .context(format!("Failed waiting for command: {}", cmd_name))?;
-
-            let stdout_bytes = stdout_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
-            let stderr_bytes = stderr_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
-
-            let stdout = String::from_utf8_lossy(&stdout_bytes);
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
-            let full_output = format!("{}{}", stdout, stderr);
-
-            // Track usage (input = output since no filtering)
-            timer.track(
-                &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
-                &full_output,
-                &full_output,
-            );
-
-            // Exit with same code as child process
-            if !status.success() {
-                std::process::exit(status.code().unwrap_or(1));
             }
         }
 
@@ -2027,6 +2113,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Proxy { .. }
     )
 }
 

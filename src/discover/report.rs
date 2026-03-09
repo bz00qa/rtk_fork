@@ -50,6 +50,16 @@ pub struct PatternOpportunity {
     pub estimated_savings_tokens: usize,
 }
 
+/// A command ranked by total output tokens consumed.
+#[derive(Debug, Serialize)]
+pub struct TokenConsumer {
+    pub command: String,
+    pub count: usize,
+    pub total_tokens: usize,
+    pub avg_tokens: usize,
+    pub has_rtk_filter: bool,
+}
+
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
@@ -60,6 +70,7 @@ pub struct DiscoverReport {
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
     pub patterns: Vec<PatternOpportunity>,
+    pub consumers: Vec<TokenConsumer>,
     pub parse_errors: usize,
 }
 
@@ -73,6 +84,22 @@ impl DiscoverReport {
 
     pub fn total_supported_count(&self) -> usize {
         self.supported.iter().map(|s| s.count).sum()
+    }
+
+    pub fn total_pattern_tokens(&self) -> usize {
+        self.patterns
+            .iter()
+            .map(|p| p.estimated_savings_tokens)
+            .sum()
+    }
+
+    pub fn total_pattern_occurrences(&self) -> usize {
+        self.patterns.iter().map(|p| p.occurrences).sum()
+    }
+
+    /// Total saveable across all sections (missed + patterns)
+    pub fn grand_total_tokens(&self) -> usize {
+        self.total_saveable_tokens() + self.total_pattern_tokens()
     }
 }
 
@@ -132,6 +159,70 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         ));
     }
 
+    // Pattern opportunities
+    if !report.patterns.is_empty() {
+        out.push_str("\nPATTERN OPPORTUNITIES -- use RTK meta-commands\n");
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+
+        for p in &report.patterns {
+            out.push_str(&format!(
+                "  {} ({}x) → {}\n    Est. savings: ~{}\n",
+                p.pattern,
+                p.occurrences,
+                p.suggestion,
+                format_tokens(p.estimated_savings_tokens),
+            ));
+        }
+
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+        out.push_str(&format!(
+            "Total: {} patterns, {} occurrences -> ~{} saveable\n",
+            report.patterns.len(),
+            report.total_pattern_occurrences(),
+            format_tokens(report.total_pattern_tokens()),
+        ));
+    }
+
+    // Grand total
+    let grand = report.grand_total_tokens();
+    if grand > 0 {
+        out.push_str(&format!(
+            "\nTOTAL SAVEABLE: ~{} (missed + patterns)\n",
+            format_tokens(grand),
+        ));
+    }
+
+    // Top token consumers
+    if !report.consumers.is_empty() {
+        out.push_str("\nTOP TOKEN CONSUMERS (by output size)\n");
+        out.push_str(&"\u{2500}".repeat(72));
+        out.push('\n');
+        out.push_str(&format!(
+            "  {:<3} {:<22} {:>5}  {:>9} {:>9}   {}\n",
+            "#", "Command", "Count", "Total", "Avg", "RTK?"
+        ));
+        out.push_str(&"\u{2500}".repeat(72));
+        out.push('\n');
+
+        for (i, c) in report.consumers.iter().take(limit).enumerate() {
+            let rtk_label = if c.has_rtk_filter { "Yes" } else { "No" };
+            out.push_str(&format!(
+                " {:>2}.  {:<22} {:>5}  {:>9} {:>9}   {}\n",
+                i + 1,
+                truncate_str(&c.command, 22),
+                c.count,
+                format_tokens(c.total_tokens),
+                format_tokens(c.avg_tokens),
+                rtk_label,
+            ));
+        }
+
+        out.push_str(&"\u{2500}".repeat(72));
+        out.push('\n');
+    }
+
     // Unhandled
     if !report.unsupported.is_empty() {
         out.push_str("\nTOP UNHANDLED COMMANDS -- open an issue?\n");
@@ -153,33 +244,20 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
         out.push_str(&"-".repeat(52));
         out.push('\n');
+        let total_unhandled: usize = report.unsupported.iter().map(|u| u.count).sum();
+        out.push_str(&format!(
+            "Total: {} unique commands, {} occurrences\n",
+            report.unsupported.len(),
+            total_unhandled
+        ));
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
     }
 
-    // Pattern opportunities
-    if !report.patterns.is_empty() {
-        out.push_str("\nPATTERN OPPORTUNITIES -- use RTK meta-commands\n");
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-
-        for p in &report.patterns {
-            out.push_str(&format!(
-                "  {} ({}x) → {}\n    Est. savings: ~{}\n",
-                p.pattern,
-                p.occurrences,
-                p.suggestion,
-                format_tokens(p.estimated_savings_tokens),
-            ));
-        }
-
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
-    }
-
-    out.push_str("\n~estimated from tool_result output sizes\n");
-
     if verbose && report.parse_errors > 0 {
-        out.push_str(&format!("Parse errors skipped: {}\n", report.parse_errors));
+        out.push_str(&format!(
+            "\nParse errors skipped: {}\n",
+            report.parse_errors
+        ));
     }
 
     out

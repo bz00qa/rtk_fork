@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{category_avg_tokens, classify_command, split_command_chain, Classification};
-use report::{DiscoverReport, PatternOpportunity, SupportedEntry, UnsupportedEntry};
+use report::{DiscoverReport, PatternOpportunity, SupportedEntry, TokenConsumer, UnsupportedEntry};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -64,6 +64,8 @@ pub fn run(
     let mut parse_errors: usize = 0;
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
+    // Track all commands by base (first 2 words) for top token consumers
+    let mut consumer_map: HashMap<String, (usize, usize)> = HashMap::new(); // base -> (count, total_output_bytes)
 
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
@@ -81,6 +83,17 @@ pub fn run(
             let parts = split_command_chain(&ext_cmd.command);
             for part in parts {
                 total_commands += 1;
+
+                // Accumulate for top token consumers
+                {
+                    let words: Vec<&str> = part.split_whitespace().take(2).collect();
+                    let base = words.join(" ");
+                    if !base.is_empty() {
+                        let entry = consumer_map.entry(base).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 += ext_cmd.output_len.unwrap_or(0);
+                    }
+                }
 
                 match classify_command(part) {
                     Classification::Supported {
@@ -201,6 +214,26 @@ pub fn run(
     // Sort by count descending
     unsupported.sort_by(|a, b| b.count.cmp(&a.count));
 
+    // Build top token consumers
+    let mut consumers: Vec<TokenConsumer> = consumer_map
+        .into_iter()
+        .map(|(base, (count, total_bytes))| {
+            let total_tokens = total_bytes / 4;
+            let avg_tokens = if count > 0 { total_tokens / count } else { 0 };
+            let has_rtk_filter =
+                matches!(classify_command(&base), Classification::Supported { .. });
+            TokenConsumer {
+                command: base,
+                count,
+                total_tokens,
+                avg_tokens,
+                has_rtk_filter,
+            }
+        })
+        .collect();
+    consumers.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+    consumers.truncate(15);
+
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
         total_commands,
@@ -209,6 +242,7 @@ pub fn run(
         supported,
         unsupported,
         patterns,
+        consumers,
         parse_errors,
     };
 

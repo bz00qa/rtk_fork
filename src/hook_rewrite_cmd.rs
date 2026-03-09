@@ -115,9 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn test_no_rewrite_for_unsupported() {
+    fn test_unsupported_gets_proxy_filter() {
         let cmd = "terraform plan";
-        assert!(registry::rewrite_command(cmd, &[]).is_none());
+        assert_eq!(
+            registry::rewrite_command(cmd, &[]),
+            Some("rtk proxy -f terraform plan".into())
+        );
     }
 
     #[test]

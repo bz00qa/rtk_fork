@@ -476,7 +476,11 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
             }
             rtk_equivalent
         }
-        _ => return None,
+        Classification::Unsupported { .. } => {
+            // Unknown command: route through proxy --filter for auto noise reduction
+            return Some(format!("rtk proxy -f {}", trimmed));
+        }
+        Classification::Ignored => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
@@ -900,7 +904,7 @@ mod tests {
     fn test_rewrite_background_unsupported_right() {
         assert_eq!(
             rewrite_command("cargo test & terraform plan", &[]),
-            Some("rtk cargo test & terraform plan".into())
+            Some("rtk cargo test & rtk proxy -f terraform plan".into())
         );
     }
 
@@ -914,8 +918,11 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_unsupported_returns_none() {
-        assert_eq!(rewrite_command("terraform plan", &[]), None);
+    fn test_rewrite_unsupported_gets_proxy_filter() {
+        assert_eq!(
+            rewrite_command("terraform plan", &[]),
+            Some("rtk proxy -f terraform plan".into())
+        );
     }
 
     #[test]
@@ -1301,20 +1308,26 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_docker_compose_up_skipped() {
-        assert_eq!(rewrite_command("docker compose up -d", &[]), None);
+    fn test_rewrite_docker_compose_up_proxy_filtered() {
+        assert_eq!(
+            rewrite_command("docker compose up -d", &[]),
+            Some("rtk proxy -f docker compose up -d".into())
+        );
     }
 
     #[test]
-    fn test_rewrite_docker_compose_down_skipped() {
-        assert_eq!(rewrite_command("docker compose down", &[]), None);
+    fn test_rewrite_docker_compose_down_proxy_filtered() {
+        assert_eq!(
+            rewrite_command("docker compose down", &[]),
+            Some("rtk proxy -f docker compose down".into())
+        );
     }
 
     #[test]
-    fn test_rewrite_docker_compose_config_skipped() {
+    fn test_rewrite_docker_compose_config_proxy_filtered() {
         assert_eq!(
             rewrite_command("docker compose -f foo.yaml config --services", &[]),
-            None
+            Some("rtk proxy -f docker compose -f foo.yaml config --services".into())
         );
     }
 
@@ -1706,19 +1719,19 @@ mod tests {
 
     #[test]
     fn test_rewrite_compound_mixed_supported_unsupported() {
-        // unsupported segments stay raw
+        // unsupported segments get proxy --filter
         assert_eq!(
             rewrite_command("cargo test && terraform plan", &[]),
-            Some("rtk cargo test && terraform plan".into())
+            Some("rtk cargo test && rtk proxy -f terraform plan".into())
         );
     }
 
     #[test]
-    fn test_rewrite_compound_all_unsupported_returns_none() {
-        // No rewrite at all: returns None
+    fn test_rewrite_compound_all_unsupported_gets_proxy() {
+        // All unsupported → all get proxy --filter
         assert_eq!(
             rewrite_command("terraform plan && terraform apply", &[]),
-            None
+            Some("rtk proxy -f terraform plan && rtk proxy -f terraform apply".into())
         );
     }
 

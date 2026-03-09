@@ -36,8 +36,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("terraform plan", &[]).is_none());
+    fn test_run_unsupported_gets_proxy_filter() {
+        assert_eq!(
+            registry::rewrite_command("terraform plan", &[]),
+            Some("rtk proxy -f terraform plan".into())
+        );
     }
 
     #[test]
