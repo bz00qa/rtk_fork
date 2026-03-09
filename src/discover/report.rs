@@ -148,7 +148,10 @@ fn style_tokens(text: &str) -> String {
 pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> String {
     let mut out = String::with_capacity(2048);
 
-    out.push_str(&format!("{}\n", styled("RTK Discover -- Savings Opportunities")));
+    out.push_str(&format!(
+        "{}\n",
+        styled("RTK Discover -- Savings Opportunities")
+    ));
     out.push_str(&format!("{}\n", styled(&"=".repeat(52))));
     out.push_str(&format!(
         "Scanned: {} sessions (last {} days), {} Bash commands\n",
