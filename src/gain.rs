@@ -266,7 +266,28 @@ pub fn run(
             .get_by_command_all(project_scope.as_deref())
             .context("Failed to load command coverage data")?;
         print_command_coverage(&all_commands);
-        print_routing_breakdown(&all_commands);
+
+        // Cache performance section
+        let (cache_hits, tokens_avoided) = tracker
+            .get_cache_stats(project_scope.as_deref())
+            .unwrap_or((0, 0));
+        if cache_hits > 0 {
+            println!("{}", styled("Cache Performance", true));
+            let table_width = 56;
+            println!("{}", "\u{2500}".repeat(table_width));
+            print_kpi("Cache hits", cache_hits.to_string());
+            print_kpi("Tokens avoided", format_tokens(tokens_avoided));
+            let hit_rate = if summary.total_commands > 0 {
+                (cache_hits as f64 / (summary.total_commands + cache_hits) as f64) * 100.0
+            } else {
+                0.0
+            };
+            print_kpi("Hit rate", format!("{:.1}%", hit_rate));
+            println!("{}", "\u{2500}".repeat(table_width));
+            println!();
+        }
+
+        print_routing_breakdown(&all_commands, cache_hits);
 
         if graph && !summary.by_day.is_empty() {
             println!("{}", styled("Daily Savings (last 30 days)", true)); // added: styled header
@@ -660,7 +681,7 @@ fn print_command_coverage(by_command: &[(String, usize, usize, f64, u64)]) {
     println!();
 }
 
-fn print_routing_breakdown(by_command: &[(String, usize, usize, f64, u64)]) {
+fn print_routing_breakdown(by_command: &[(String, usize, usize, f64, u64)], cache_hits: usize) {
     let mut dedicated = 0usize;
     let mut proxy = 0usize;
     let mut other = 0usize;
@@ -692,6 +713,12 @@ fn print_routing_breakdown(by_command: &[(String, usize, usize, f64, u64)]) {
         "  Proxy auto-filter:  {:>6} commands  (ANSI/dedup/truncate)",
         proxy
     );
+    if cache_hits > 0 {
+        println!(
+            "  Cache hits:         {:>6} commands  (repeated output skipped)",
+            cache_hits
+        );
+    }
     if other > 0 {
         println!("  Other:              {:>6} commands", other);
     }
