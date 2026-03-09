@@ -1,5 +1,7 @@
 use crate::dedup;
 use crate::utils;
+use lazy_static::lazy_static;
+use regex::Regex;
 
 /// Maximum output lines before auto-truncation
 const MAX_LINES: usize = 500;
@@ -25,11 +27,59 @@ pub fn filter(output: &str) -> (String, bool) {
     filter_with_status(output, true)
 }
 
+/// Strip lines overwritten by carriage return (progress bars, spinners).
+/// Only keeps the final version of each line group.
+fn strip_cr_overwrites(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| {
+            if let Some(pos) = line.rfind('\r') {
+                &line[pos + 1..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Strip decorative separators (═══, ───, ***, etc.) and collapse
+/// runs of 3+ blank lines into a single blank line.
+fn strip_decorative(output: &str) -> String {
+    lazy_static! {
+        static ref DECORATOR: Regex = Regex::new(r"^[\s=═─━\-\*~_╌╍┄┅┈┉]{4,}\s*$").unwrap();
+    }
+    let mut result = Vec::new();
+    let mut blank_count = 0u32;
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                result.push(line);
+            }
+        } else if DECORATOR.is_match(line) {
+            // Skip decorative lines entirely
+        } else {
+            blank_count = 0;
+            result.push(line);
+        }
+    }
+
+    result.join("\n")
+}
+
 /// Filter with awareness of command exit status.
 /// When `success` is false, truncation is skipped to preserve error context.
 pub fn filter_with_status(output: &str, success: bool) -> (String, bool) {
     // 1. Strip ANSI
     let clean = utils::strip_ansi(output);
+
+    // 1.5. Strip carriage-return overwritten lines
+    let clean = strip_cr_overwrites(&clean);
+
+    // 1.6. Strip decorative separators and excessive blank lines
+    let clean = strip_decorative(&clean);
 
     // 2. Noise pattern dedup
     let deduped = dedup::dedup_output(&clean);
@@ -136,5 +186,73 @@ mod tests {
         let output = filter_light(input);
         assert!(output.contains("ok (x3)"));
         assert!(output.contains("done"));
+    }
+
+    #[test]
+    fn test_strip_cr_overwrites() {
+        let input = "Building...\rBuilding... 50%\rBuilding... 100%\rDone!";
+        let result = strip_cr_overwrites(input);
+        assert_eq!(result, "Done!");
+    }
+
+    #[test]
+    fn test_strip_decorative_separators() {
+        let input = "Header\n════════════════\nContent\n────────────────\nFooter";
+        let result = strip_decorative(input);
+        assert_eq!(result, "Header\nContent\nFooter");
+    }
+
+    #[test]
+    fn test_strip_decorative_preserves_short_dashes() {
+        let input = "file-name.rs\n--flag value";
+        let result = strip_decorative(input);
+        assert!(result.contains("file-name.rs"));
+        assert!(result.contains("--flag value"));
+    }
+
+    #[test]
+    fn test_collapse_blank_lines() {
+        let input = "line1\n\n\n\n\nline2\n\nline3";
+        let result = strip_decorative(input);
+        let blank_count = result.lines().filter(|l| l.trim().is_empty()).count();
+        // 4 consecutive blanks between line1/line2 collapse to 2,
+        // 1 blank between line2/line3 stays → 3 total blanks
+        assert!(
+            blank_count <= 3,
+            "Expected at most 3 blank lines, got {}",
+            blank_count
+        );
+        // Verify the original 4-blank run was actually reduced
+        assert!(blank_count < 5, "Blank lines were not collapsed");
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+    }
+
+    #[test]
+    fn test_filter_build_output_savings() {
+        let mut input = String::new();
+        for i in 1..=20 {
+            input.push_str(&format!("   Compiling pkg{} v1.0.0\n", i));
+        }
+        input.push_str("\n════════════════════════════════\n");
+        input.push_str("✓ 42 modules transformed\n");
+        input.push_str("✓ 38 modules transformed\n");
+        input.push_str("✓ 15 modules transformed\n");
+        input.push_str("\n\n\n\n\n");
+        input.push_str("Build complete in 2.3s\n");
+        input.push_str("  bundle size: 145 kB\n");
+
+        let (output, _) = filter(&input);
+
+        let input_tokens = input.split_whitespace().count();
+        let output_tokens = output.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 50.0,
+            "Expected ≥50% savings on build output, got {:.1}%\nOutput:\n{}",
+            savings,
+            output
+        );
     }
 }

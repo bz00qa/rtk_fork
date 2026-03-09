@@ -20,6 +20,20 @@ lazy_static! {
         Regex::new(r"^\s*Using cached\s+").unwrap(),                 // "Using cached foo-1.0.tar.gz"
         // General
         Regex::new(r"^\s*warning\[").unwrap(),                       // Rust warnings
+        // Progress bars and spinners
+        Regex::new(r"^\s*[\[({]?[#=\->.·]+[\])}]?\s*\d+%").unwrap(),
+        Regex::new(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✗●○◉◎]").unwrap(),
+        // Vite/Webpack/Turbo build lines
+        Regex::new(r"^\s*✓\s+\d+\s+modules?\s+transformed").unwrap(),
+        Regex::new(r"^\s*\[vite\]\s+optimized\s+deps").unwrap(),
+        Regex::new(r"^\s*hmr\s+update\s+").unwrap(),
+        // Turbo/pnpm workspace
+        Regex::new(r"^\s*cache\s+(hit|miss|bypass)").unwrap(),
+        // Generic build noise
+        Regex::new(r"^\s*Bundling\s+").unwrap(),
+        Regex::new(r"^\s*Transforming\s+").unwrap(),
+        Regex::new(r"^\s*Processing\s+").unwrap(),
+        Regex::new(r"^\s*Generating\s+").unwrap(),
     ];
 }
 
