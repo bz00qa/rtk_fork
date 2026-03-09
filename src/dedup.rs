@@ -52,8 +52,8 @@ pub fn dedup_output(output: &str) -> String {
                 result.push(format!("  ... ({} similar lines omitted)", count - 1));
             } else {
                 // Few lines — keep them
-                for j in start..i {
-                    result.push(lines[j].to_string());
+                for line_ref in &lines[start..i] {
+                    result.push(line_ref.to_string());
                 }
             }
         } else {

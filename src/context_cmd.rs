@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_context_output_format() {
-        let sections = vec![
+        let sections = [
             "=== Status ===",
             "## main...origin/main",
             " M src/main.rs",

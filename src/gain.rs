@@ -68,6 +68,7 @@ const COMMAND_REGISTRY: &[(&str, &str)] = &[
     ("proxy", "Meta Commands"),
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
     graph: bool,
@@ -816,6 +817,7 @@ fn export_json(
         }
     }
 
+    #[allow(clippy::type_complexity)]
     let mut cat_map: std::collections::HashMap<
         &str,
         (Vec<&str>, Vec<&str>, usize, usize, f64, usize),

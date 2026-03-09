@@ -37,6 +37,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Type alias for command summary rows: (base_cmd, count, saved_tokens, avg_savings_pct, avg_exec_ms)
+type CommandSummaryRow = (String, usize, usize, f64, u64);
+
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
@@ -651,7 +654,7 @@ impl Tracker {
     fn get_by_command(
         &self,
         project_path: Option<&str>, // added
-    ) -> Result<Vec<(String, usize, usize, f64, u64)>> {
+    ) -> Result<Vec<CommandSummaryRow>> {
         let (project_exact, project_glob) = project_filter_params(project_path);
         // Aggregate by base_cmd (first 3 words, computed at insert/migration time)
         let mut stmt = self.conn.prepare(
@@ -678,10 +681,7 @@ impl Tracker {
     }
 
     /// Get all commands grouped by base_cmd (no limit), for coverage reporting.
-    pub fn get_by_command_all(
-        &self,
-        project_path: Option<&str>,
-    ) -> Result<Vec<(String, usize, usize, f64, u64)>> {
+    pub fn get_by_command_all(&self, project_path: Option<&str>) -> Result<Vec<CommandSummaryRow>> {
         let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT base_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
