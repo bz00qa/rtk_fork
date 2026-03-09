@@ -1,6 +1,5 @@
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::HashMap;
 
 lazy_static! {
     /// Patterns that indicate noisy/repeated lines to collapse
@@ -90,6 +89,7 @@ pub fn dedup_identical(output: &str) -> String {
 
 /// Count noise lines that would be deduplicated.
 /// Returns (total_lines, noise_lines, estimated_savings_pct).
+#[allow(dead_code)]
 pub fn estimate_savings(output: &str) -> (usize, usize, f64) {
     let total = output.lines().count();
     let noise = output.lines().filter(|l| match_noise(l).is_some()).count();
