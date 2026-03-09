@@ -1046,6 +1046,21 @@ impl Tracker {
             Ok(0.0)
         }
     }
+
+    /// Count how many times a base_cmd has been run in the last N minutes.
+    /// Used for repeat alerting — suggest `rtk watch` when commands repeat.
+    pub fn count_recent_runs(&self, base_cmd: &str, minutes: u64) -> Result<usize> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+        let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE base_cmd = ?1 AND timestamp > ?2",
+            rusqlite::params![base_cmd, cutoff_str],
+            |row| row.get(0),
+        )?;
+
+        Ok(count as usize)
+    }
 }
 
 fn get_db_path() -> Result<PathBuf> {

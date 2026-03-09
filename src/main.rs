@@ -1991,6 +1991,7 @@ fn main() -> Result<()> {
                     &full_output,
                     &final_output,
                 );
+                maybe_hint_watch(&format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")));
 
                 if !success {
                     std::process::exit(child_output.status.code().unwrap_or(1));
@@ -2070,6 +2071,7 @@ fn main() -> Result<()> {
                     &full_output,
                     &full_output,
                 );
+                maybe_hint_watch(&format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")));
 
                 if !status.success() {
                     std::process::exit(status.code().unwrap_or(1));
@@ -2141,6 +2143,68 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Gt { .. }
             | Commands::Proxy { .. }
     )
+}
+
+/// Emit a hint to stderr if the same command has been repeated 3+ times recently.
+/// Only hints once per command per session (tracks via a static HashSet).
+fn maybe_hint_watch(rtk_cmd: &str) {
+    use std::sync::Mutex;
+    lazy_static::lazy_static! {
+        static ref HINTED: Mutex<std::collections::HashSet<String>> =
+            Mutex::new(std::collections::HashSet::new());
+    }
+
+    // Skip if quiet mode
+    if std::env::var("RTK_QUIET").is_ok_and(|v| v == "1" || v.to_lowercase() == "true") {
+        return;
+    }
+
+    // Extract base_cmd (first 3 words of rtk_cmd)
+    let base_cmd: String = rtk_cmd
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Skip volatile commands that are naturally repeated
+    const SKIP_HINT: &[&str] = &[
+        "rtk git status",
+        "rtk git diff",
+        "rtk git log",
+        "rtk git show",
+        "rtk git add",
+        "rtk git commit",
+        "rtk git push",
+        "rtk git pull",
+        "rtk ls",
+        "rtk find",
+        "rtk grep",
+        "rtk read",
+    ];
+    if SKIP_HINT.iter().any(|p| base_cmd.starts_with(p)) {
+        return;
+    }
+
+    // Only hint once per base_cmd per session
+    {
+        let mut hinted = match HINTED.lock() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        if hinted.contains(&base_cmd) {
+            return;
+        }
+
+        if let Ok(tracker) = crate::tracking::Tracker::new() {
+            if let Ok(count) = tracker.count_recent_runs(&base_cmd, 60) {
+                if count >= 3 {
+                    let short_cmd = base_cmd.strip_prefix("rtk ").unwrap_or(&base_cmd);
+                    eprintln!("[repeated {}x — consider: rtk watch {}]", count, short_cmd);
+                    hinted.insert(base_cmd);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
