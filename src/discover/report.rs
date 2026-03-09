@@ -1,4 +1,6 @@
+use colored::Colorize;
 use serde::Serialize;
+use std::io::IsTerminal;
 
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -103,25 +105,66 @@ impl DiscoverReport {
     }
 }
 
+/// Bold green styled text (TTY-aware, matches gain.rs style)
+fn styled(text: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return text.to_string();
+    }
+    text.bold().green().to_string()
+}
+
+/// Colorize percentage based on savings tier (TTY-aware)
+fn colorize_pct(pct: f64) -> String {
+    let text = format!("{:.0}%", pct);
+    if !std::io::stdout().is_terminal() {
+        return text;
+    }
+    if pct >= 70.0 {
+        text.green().bold().to_string()
+    } else if pct >= 40.0 {
+        text.yellow().bold().to_string()
+    } else {
+        text.red().bold().to_string()
+    }
+}
+
+/// Style command names with cyan+bold (TTY-aware)
+fn style_cmd(cmd: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return cmd.to_string();
+    }
+    cmd.bright_cyan().bold().to_string()
+}
+
+/// Style token counts (TTY-aware)
+fn style_tokens(text: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return text.to_string();
+    }
+    text.bright_white().to_string()
+}
+
 /// Format report as text.
 pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> String {
     let mut out = String::with_capacity(2048);
 
-    out.push_str("RTK Discover -- Savings Opportunities\n");
-    out.push_str(&"=".repeat(52));
-    out.push('\n');
+    out.push_str(&format!("{}\n", styled("RTK Discover -- Savings Opportunities")));
+    out.push_str(&format!("{}\n", styled(&"=".repeat(52))));
     out.push_str(&format!(
         "Scanned: {} sessions (last {} days), {} Bash commands\n",
-        report.sessions_scanned, report.since_days, report.total_commands
+        style_tokens(&report.sessions_scanned.to_string()),
+        report.since_days,
+        style_tokens(&report.total_commands.to_string()),
     ));
+    let rtk_pct = if report.total_commands > 0 {
+        report.already_rtk * 100 / report.total_commands
+    } else {
+        0
+    };
     out.push_str(&format!(
-        "Already using RTK: {} commands ({}%)\n",
-        report.already_rtk,
-        if report.total_commands > 0 {
-            report.already_rtk * 100 / report.total_commands
-        } else {
-            0
-        }
+        "Already using RTK: {} commands ({})\n",
+        style_tokens(&report.already_rtk.to_string()),
+        colorize_pct(rtk_pct as f64),
     ));
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
@@ -131,9 +174,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     // Missed savings
     if !report.supported.is_empty() {
-        out.push_str("\nMISSED SAVINGS -- Commands RTK already handles\n");
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
+        out.push_str(&format!(
+            "\n{}\n",
+            styled("MISSED SAVINGS -- Commands RTK already handles")
+        ));
+        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
         out.push_str(&format!(
             "{:<24} {:>5}    {:<18} {:<13} {:>12}\n",
             "Command", "Count", "RTK Equivalent", "Status", "Est. Savings"
@@ -142,46 +187,46 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         for entry in report.supported.iter().take(limit) {
             out.push_str(&format!(
                 "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
-                truncate_str(&entry.command, 23),
+                style_cmd(&truncate_str(&entry.command, 23)),
                 entry.count,
-                entry.rtk_equivalent,
+                style_cmd(entry.rtk_equivalent),
                 entry.rtk_status.as_str(),
-                format_tokens(entry.estimated_savings_tokens),
+                style_tokens(&format_tokens(entry.estimated_savings_tokens)),
             ));
         }
 
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
+        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
         out.push_str(&format!(
             "Total: {} commands -> ~{} saveable\n",
-            report.total_supported_count(),
-            format_tokens(report.total_saveable_tokens()),
+            style_tokens(&report.total_supported_count().to_string()),
+            style_tokens(&format_tokens(report.total_saveable_tokens())),
         ));
     }
 
     // Pattern opportunities
     if !report.patterns.is_empty() {
-        out.push_str("\nPATTERN OPPORTUNITIES -- use RTK meta-commands\n");
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
+        out.push_str(&format!(
+            "\n{}\n",
+            styled("PATTERN OPPORTUNITIES -- use RTK meta-commands")
+        ));
+        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
 
         for p in &report.patterns {
             out.push_str(&format!(
-                "  {} ({}x) → {}\n    Est. savings: ~{}\n",
-                p.pattern,
+                "  {} ({}x) \u{2192} {}\n    Est. savings: ~{}\n",
+                style_cmd(&p.pattern),
                 p.occurrences,
-                p.suggestion,
-                format_tokens(p.estimated_savings_tokens),
+                style_cmd(&p.suggestion),
+                style_tokens(&format_tokens(p.estimated_savings_tokens)),
             ));
         }
 
-        out.push_str(&"-".repeat(72));
-        out.push('\n');
+        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
         out.push_str(&format!(
             "Total: {} patterns, {} occurrences -> ~{} saveable\n",
-            report.patterns.len(),
-            report.total_pattern_occurrences(),
-            format_tokens(report.total_pattern_tokens()),
+            style_tokens(&report.patterns.len().to_string()),
+            style_tokens(&report.total_pattern_occurrences().to_string()),
+            style_tokens(&format_tokens(report.total_pattern_tokens())),
         ));
     }
 
@@ -189,38 +234,47 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     let grand = report.grand_total_tokens();
     if grand > 0 {
         out.push_str(&format!(
-            "\nTOTAL SAVEABLE: ~{} (missed + patterns)\n",
-            format_tokens(grand),
+            "\n{}: ~{} (missed + patterns)\n",
+            styled("TOTAL SAVEABLE"),
+            style_tokens(&format_tokens(grand)),
         ));
     }
 
     // Top token consumers
     if !report.consumers.is_empty() {
-        out.push_str("\nTOP TOKEN CONSUMERS (by output size)\n");
-        out.push_str(&"\u{2500}".repeat(72));
-        out.push('\n');
+        out.push_str(&format!(
+            "\n{}\n",
+            styled("TOP TOKEN CONSUMERS (by output size)")
+        ));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
         out.push_str(&format!(
             "  {:<3} {:<22} {:>5}  {:>9} {:>9}   {}\n",
             "#", "Command", "Count", "Total", "Avg", "RTK?"
         ));
-        out.push_str(&"\u{2500}".repeat(72));
-        out.push('\n');
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
 
         for (i, c) in report.consumers.iter().take(limit).enumerate() {
-            let rtk_label = if c.has_rtk_filter { "Yes" } else { "No" };
+            let rtk_label = if c.has_rtk_filter {
+                styled("Yes")
+            } else {
+                if std::io::stdout().is_terminal() {
+                    "No".red().bold().to_string()
+                } else {
+                    "No".to_string()
+                }
+            };
             out.push_str(&format!(
                 " {:>2}.  {:<22} {:>5}  {:>9} {:>9}   {}\n",
                 i + 1,
-                truncate_str(&c.command, 22),
+                style_cmd(&truncate_str(&c.command, 22)),
                 c.count,
-                format_tokens(c.total_tokens),
-                format_tokens(c.avg_tokens),
+                style_tokens(&format_tokens(c.total_tokens)),
+                style_tokens(&format_tokens(c.avg_tokens)),
                 rtk_label,
             ));
         }
 
-        out.push_str(&"\u{2500}".repeat(72));
-        out.push('\n');
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
 
         let has_unfiltered = report
             .consumers
@@ -237,9 +291,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     // Unhandled
     if !report.unsupported.is_empty() {
-        out.push_str("\nTOP UNHANDLED COMMANDS -- open an issue?\n");
-        out.push_str(&"-".repeat(52));
-        out.push('\n');
+        out.push_str(&format!(
+            "\n{}\n",
+            styled("TOP UNHANDLED COMMANDS -- open an issue?")
+        ));
+        out.push_str(&format!("{}\n", styled(&"-".repeat(52))));
         out.push_str(&format!(
             "{:<24} {:>5}    {}\n",
             "Command", "Count", "Example"
@@ -248,19 +304,18 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         for entry in report.unsupported.iter().take(limit) {
             out.push_str(&format!(
                 "{:<24} {:>5}    {}\n",
-                truncate_str(&entry.base_command, 23),
+                style_cmd(&truncate_str(&entry.base_command, 23)),
                 entry.count,
                 truncate_str(&entry.example, 40),
             ));
         }
 
-        out.push_str(&"-".repeat(52));
-        out.push('\n');
+        out.push_str(&format!("{}\n", styled(&"-".repeat(52))));
         let total_unhandled: usize = report.unsupported.iter().map(|u| u.count).sum();
         out.push_str(&format!(
             "Total: {} unique commands, {} occurrences\n",
-            report.unsupported.len(),
-            total_unhandled
+            style_tokens(&report.unsupported.len().to_string()),
+            style_tokens(&total_unhandled.to_string()),
         ));
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
     }
