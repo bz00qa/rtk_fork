@@ -221,6 +221,18 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
         out.push_str(&"\u{2500}".repeat(72));
         out.push('\n');
+
+        let has_unfiltered = report
+            .consumers
+            .iter()
+            .take(limit)
+            .any(|c| !c.has_rtk_filter);
+        if has_unfiltered {
+            out.push_str(
+                "  RTK?=No: not yet filtered. Request support:\n  \
+                 -> github.com/rtk-ai/rtk/issues\n",
+            );
+        }
     }
 
     // Unhandled

@@ -94,8 +94,7 @@ pub fn run(
 
                 // Accumulate for top token consumers
                 {
-                    let words: Vec<&str> = part.split_whitespace().take(2).collect();
-                    let base = words.join(" ");
+                    let base = consumer_base(part);
                     if !base.is_empty() {
                         let entry = consumer_map.entry(base).or_insert((0, 0));
                         entry.0 += 1;
@@ -433,6 +432,58 @@ fn normalize_cmd_base(cmd: &str) -> Option<String> {
         0 => None,
         1 => Some(parts[0].to_string()),
         _ => Some(format!("{} {}", parts[0], parts[1])),
+    }
+}
+
+/// Extract a smart base key for top-token-consumer grouping.
+///
+/// Handles special patterns:
+/// - `python -m pytest ...` → `python -m pytest` (3 words, not 2)
+/// - `python3 -m mypy ...`  → `python3 -m mypy`
+/// - `pnpm --filter X cmd`  → `pnpm cmd` (skip --filter + its arg)
+/// - `pnpm -r build`        → `pnpm build` (skip -r flag)
+/// - `npm run build`        → `npm run` (standard 2-word)
+/// - `go test ./...`        → `go test` (standard 2-word)
+fn consumer_base(cmd: &str) -> String {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // python/python3 -m <module> → keep 3 words
+    if (words[0] == "python" || words[0] == "python3") && words.len() >= 3 && words[1] == "-m" {
+        return format!("{} -m {}", words[0], words[2]);
+    }
+
+    // pnpm with flags before the subcommand: skip --filter/F + arg, -r/-w/etc
+    if words[0] == "pnpm" && words.len() >= 2 {
+        let mut i = 1;
+        while i < words.len() {
+            if (words[i] == "--filter" || words[i] == "-F") && i + 1 < words.len() {
+                i += 2; // skip flag + its argument
+            } else if words[i].starts_with("--filter=") || words[i].starts_with("-F") {
+                i += 1; // skip combined flag=value
+            } else if words[i] == "-r"
+                || words[i] == "--recursive"
+                || words[i] == "-w"
+                || words[i] == "--workspace-root"
+            {
+                i += 1; // skip standalone flags
+            } else {
+                break;
+            }
+        }
+        if i < words.len() {
+            return format!("pnpm {}", words[i]);
+        }
+        return "pnpm".to_string();
+    }
+
+    // Default: first 2 words
+    if words.len() >= 2 {
+        format!("{} {}", words[0], words[1])
+    } else {
+        words[0].to_string()
     }
 }
 
