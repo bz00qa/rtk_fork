@@ -1,5 +1,6 @@
 mod auto_filter;
 mod aws_cmd;
+mod cache;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -1957,13 +1958,38 @@ fn main() -> Result<()> {
                 let success = child_output.status.success();
 
                 let (filtered, _) = auto_filter::filter_with_status(&full_output, success);
-                print!("{}", filtered);
+
+                // Auto-cache: diff against recent cached output
+                let cmd_str = format!("{} {}", cmd_name, cmd_args.join(" "));
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
+                let final_output = if cache::is_enabled() {
+                    let ttl = cache::get_ttl_minutes();
+                    if let Some((cached, age_secs)) = cache::load(&cmd_str, &cwd, ttl) {
+                        let diff = cache::diff_output(&cached, &filtered);
+                        let _ = cache::store(&cmd_str, &cwd, &filtered);
+                        if diff.contains("no changes") {
+                            format!("[no changes since {}s ago]", age_secs)
+                        } else {
+                            format!("[changes since {}s ago]\n{}", age_secs, diff)
+                        }
+                    } else {
+                        let _ = cache::store(&cmd_str, &cwd, &filtered);
+                        filtered.clone()
+                    }
+                } else {
+                    filtered.clone()
+                };
+
+                print!("{}", final_output);
 
                 timer.track(
                     &format!("{} {}", cmd_name, cmd_args.join(" ")),
                     &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
                     &full_output,
-                    &filtered,
+                    &final_output,
                 );
 
                 if !success {

@@ -16,6 +16,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -24,6 +26,21 @@ pub struct HooksConfig {
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub ttl_minutes: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_minutes: 5,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
