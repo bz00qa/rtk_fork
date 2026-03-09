@@ -81,7 +81,15 @@ pub fn run(
 
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
-            for part in parts {
+
+            // Find the last non-ignored part — that's the command that actually
+            // produced the output. In chains like `PATH=... && cd dir && npm build`,
+            // only `npm build` should get output_len attributed.
+            let effective_idx = parts
+                .iter()
+                .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+
+            for (idx, part) in parts.iter().enumerate() {
                 total_commands += 1;
 
                 // Accumulate for top token consumers
@@ -91,7 +99,10 @@ pub fn run(
                     if !base.is_empty() {
                         let entry = consumer_map.entry(base).or_insert((0, 0));
                         entry.0 += 1;
-                        entry.1 += ext_cmd.output_len.unwrap_or(0);
+                        // Only attribute output to the effective command
+                        if Some(idx) == effective_idx {
+                            entry.1 += ext_cmd.output_len.unwrap_or(0);
+                        }
                     }
                 }
 
@@ -116,11 +127,17 @@ pub fn run(
                         bucket.count += 1;
 
                         // Estimate tokens for this command
-                        let output_tokens = if let Some(len) = ext_cmd.output_len {
-                            // Real: from tool_result content length
-                            len / 4
+                        let output_tokens = if Some(idx) == effective_idx {
+                            if let Some(len) = ext_cmd.output_len {
+                                // Real: from tool_result content length
+                                len / 4
+                            } else {
+                                // Fallback: category average
+                                let subcmd = extract_subcmd(part);
+                                category_avg_tokens(category, subcmd)
+                            }
                         } else {
-                            // Fallback: category average
+                            // Not the effective command — use category average
                             let subcmd = extract_subcmd(part);
                             category_avg_tokens(category, subcmd)
                         };
