@@ -1965,33 +1965,34 @@ fn main() -> Result<()> {
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
 
-                let final_output = if cache::is_enabled() {
+                let (final_output, was_cache_hit) = if cache::is_enabled() {
                     let ttl = cache::get_ttl_minutes();
                     if let Some((cached, age_secs)) = cache::load(&cmd_str, &cwd, ttl) {
                         let diff = cache::diff_output(&cached, &filtered);
                         let _ = cache::store(&cmd_str, &cwd, &filtered);
                         if diff.contains("no changes") {
-                            format!("[no changes since {}s ago]", age_secs)
+                            (format!("[no changes since {}s ago]", age_secs), true)
                         } else {
-                            format!("[changes since {}s ago]\n{}", age_secs, diff)
+                            (format!("[changes since {}s ago]\n{}", age_secs, diff), true)
                         }
                     } else {
                         let _ = cache::store(&cmd_str, &cwd, &filtered);
-                        filtered.clone()
+                        (filtered.clone(), false)
                     }
                 } else {
-                    filtered.clone()
+                    (filtered.clone(), false)
                 };
 
                 print!("{}", final_output);
 
-                timer.track(
-                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                    &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
-                    &full_output,
-                    &final_output,
-                );
-                maybe_hint_watch(&format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")));
+                let orig_cmd = format!("{} {}", cmd_name, cmd_args.join(" "));
+                let rtk_cmd_str = format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" "));
+                if was_cache_hit {
+                    timer.track_cache_hit(&orig_cmd, &rtk_cmd_str, &full_output, &final_output);
+                } else {
+                    timer.track(&orig_cmd, &rtk_cmd_str, &full_output, &final_output);
+                }
+                maybe_hint_watch(&rtk_cmd_str);
 
                 if !success {
                     std::process::exit(child_output.status.code().unwrap_or(1));
