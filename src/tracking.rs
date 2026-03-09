@@ -311,6 +311,10 @@ impl Tracker {
             "ALTER TABLE commands ADD COLUMN base_cmd TEXT DEFAULT ''",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN cache_hit INTEGER DEFAULT 0",
+            [],
+        );
         // Backfill base_cmd for existing rows that don't have it yet
         let needs_backfill: bool = conn
             .query_row(
@@ -396,6 +400,10 @@ impl Tracker {
             "ALTER TABLE commands ADD COLUMN base_cmd TEXT DEFAULT ''",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN cache_hit INTEGER DEFAULT 0",
+            [],
+        );
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
                 id INTEGER PRIMARY KEY,
@@ -466,6 +474,43 @@ impl Tracker {
             ],
         )?;
 
+        self.cleanup_old()?;
+        Ok(())
+    }
+
+    pub fn record_cache_hit(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+    ) -> Result<()> {
+        let saved = input_tokens.saturating_sub(output_tokens);
+        let pct = if input_tokens > 0 {
+            (saved as f64 / input_tokens as f64) * 100.0
+        } else {
+            0.0
+        };
+        let project_path = current_project_path_string();
+        let base_cmd = extract_base_cmd(rtk_cmd);
+
+        self.conn.execute(
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, base_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, cache_hit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)",
+            params![
+                Utc::now().to_rfc3339(),
+                original_cmd,
+                rtk_cmd,
+                base_cmd,
+                project_path,
+                input_tokens as i64,
+                output_tokens as i64,
+                saved as i64,
+                pct,
+                exec_time_ms as i64,
+            ],
+        )?;
         self.cleanup_old()?;
         Ok(())
     }
@@ -1215,6 +1260,22 @@ impl TimedExecution {
         }
     }
 
+    pub fn track_cache_hit(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record_cache_hit(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+        }
+    }
+
     /// Track passthrough commands (timing-only, no token counting).
     ///
     /// For commands that stream output or run interactively where output
@@ -1511,5 +1572,41 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // 2 out of 3 succeeded = 66.7%
         assert!((summary.recovery_rate - 66.7).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_cache_hit_recorded_separately() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        tracker
+            .record("cargo build", "rtk proxy -f cargo build", 500, 100, 50)
+            .expect("record normal");
+
+        tracker
+            .record_cache_hit("cargo build", "rtk proxy -f cargo build", 500, 10, 30)
+            .expect("record cache hit");
+
+        let recent = tracker.get_recent(10).expect("get recent");
+        assert_eq!(recent.len(), 2);
+
+        let cache_count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE cache_hit = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cache_count, 1);
+
+        let normal_count: i64 = tracker
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM commands WHERE cache_hit = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(normal_count, 1);
     }
 }
