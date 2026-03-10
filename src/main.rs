@@ -10,6 +10,7 @@ mod container;
 mod context_cmd;
 mod curl_cmd;
 mod dedup;
+mod deno_cmd;
 mod deps;
 mod diff_cmd;
 mod discover;
