@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **watch**: `rtk watch <cmd>` — show only changes since last run
 * **read --diet**: markdown token reduction mode (strip filler words)
 
+### Git & Diff Improvements
+* **smarter compact diff**: strip context lines (only show +/- changes), auto stat-only mode for diffs >1000 lines, binary file detection with labels instead of gibberish
+* **session dedup for context**: `rtk context` output hash cache — if nothing changed since last call, prints "(no changes)" instead of repeating full output
+
+### Gain Realization Dashboard
+* **command coverage section**: category-level usage stats (Git & VCS, Build & Compile, Test, etc.) sorted by savings, with unused command hints
+* **routing breakdown**: dedicated filters vs proxy auto-filter vs cache hits
+* **top token consumers**: discover now shows biggest token-consuming commands from JSONL sessions
+* **JSON/CSV export**: coverage data included in `rtk gain --format json`
+
 ### Smart Proxy Features
 * **auto-filter**: generic noise reduction for all proxy commands — ANSI strip, CR overwrite removal, decorative separator stripping (═══, ───), blank line collapse, noise pattern dedup, smart truncation (head + tail)
 * **auto-cache**: repeated proxy commands within TTL (default 5 min) show diff against previous run instead of full output. Configurable via `RTK_CACHE_TTL` env or `[cache]` config section

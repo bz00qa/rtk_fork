@@ -152,7 +152,7 @@ rtk diff file1 file2            # Condensed diff
 ```bash
 rtk git status                  # Compact status
 rtk git log -n 10               # One-line commits
-rtk git diff                    # Condensed diff
+rtk git diff                    # Compact diff (changes only, auto-stat >1K lines)
 rtk git add                     # -> "ok"
 rtk git commit -m "msg"         # -> "ok abc1234"
 rtk git push                    # -> "ok main"
@@ -231,7 +231,7 @@ rtk watch <cmd>                 # Show only changes since last run
 
 ### Token Savings Analytics
 ```bash
-rtk gain                        # Colored dashboard with cache stats
+rtk gain                        # Realization dashboard with coverage + cache stats
 rtk gain --graph                # ASCII graph (last 30 days)
 rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown
