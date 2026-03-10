@@ -324,6 +324,8 @@ After install, **restart Claude Code**.
 
 Commands already using `rtk`, heredocs (`<<`), and ignored commands (`cd`, `echo`, env assignments) pass through unchanged. Unrecognized commands are auto-routed through `rtk proxy --filter` for generic noise reduction (ANSI stripping, dedup, truncation).
 
+The hook recognizes **200+ command variants** across git (51 subcmds), npm (25), cargo (13), go (12), pnpm (with `--filter`/`-F`/`-r`), and more. PATH prefixes with quoted spaces are handled correctly.
+
 ### Compound Commands
 
 The hook handles compound commands (`&&`, `||`, `;`, `|`) by rewriting each segment independently:

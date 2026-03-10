@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.27.2-mod5] Fork Enhancements (2026-03-10)
 
+### Command Parsing Overhaul
+* **PATH prefix fix**: quoted values with spaces (e.g., `PATH="/c/Program Files/nodejs:$PATH"`) no longer misparsed
+* **compound command rewriting**: hook splits `&&`, `||`, `;`, `|` and rewrites each segment independently — env assignments and `cd` pass through untouched
+* **50+ new subcommands recognized**: git 12→51 subcmds (with `-C` flag), pnpm `--filter`/`-F`/`-r` support, npm 2→25 subcmds, cargo 6→13 subcmds, go 3→12 subcmds
+* **pure assignment detection**: `VAR=value` lines no longer misclassified
+* **leading operator stripping**: stray `&&`/`||`/`;` at start of segments handled gracefully
+* **expanded ignored commands**: Windows system commands (TASKLIST/TASKKILL), Python scripts, `go version`, `rustc --`, `npm root`, `node --check`, `python --version`
+* **results**: +11% commands recognized (8,169→9,108), +16% saveable tokens (~1.9M→~2.2M), -97% unhandled noise (~2,400→~74)
+
 ### New Commands
 * **context**: `rtk context` — combined git status + diff + log in one call
 * **dedup**: `rtk dedup` — collapse repeated/noisy output lines
