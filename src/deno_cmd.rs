@@ -233,4 +233,22 @@ Download https://deno.land/x/oak@v12.6.1/mod.ts
         let result = filter_deno_output(input);
         assert_eq!(result, "ok");
     }
+
+    #[test]
+    fn test_filter_deno_preserves_check_lines() {
+        let input = "Check file:///project/main.ts\n";
+        let result = filter_deno_output(input);
+        assert!(result.contains("Check"));
+    }
+
+    #[test]
+    fn test_filter_deno_preserves_errors_strips_downloads() {
+        let input = r#"Download https://deno.land/std@0.210.0/path/mod.ts
+error: Module not found "https://deno.land/x/nonexistent/mod.ts"
+"#;
+        let result = filter_deno_output(input);
+        assert!(result.contains("error:"));
+        assert!(result.contains("Module not found"));
+        assert!(!result.contains("Download"));
+    }
 }

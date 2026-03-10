@@ -27,18 +27,19 @@ pub fn filter_bun_install(output: &str) -> String {
         }
 
         // Skip progress lines like "[1/5] ..." or "[12/34] ..."
-        if trimmed.starts_with('[') && trimmed.contains(']') {
-            let after_bracket = &trimmed[trimmed.find(']').unwrap() + 1..];
-            if after_bracket.trim_end().ends_with("...") {
-                // Verify the bracket content is N/N
-                let bracket_content = &trimmed[1..trimmed.find(']').unwrap()];
-                if bracket_content.contains('/') {
-                    let parts: Vec<&str> = bracket_content.split('/').collect();
-                    if parts.len() == 2
-                        && parts[0].trim().parse::<u32>().is_ok()
-                        && parts[1].trim().parse::<u32>().is_ok()
-                    {
-                        continue;
+        if trimmed.starts_with('[') {
+            if let Some(close) = trimmed.find(']') {
+                let after_bracket = trimmed[close + 1..].trim();
+                if after_bracket.ends_with("...") {
+                    let bracket_content = &trimmed[1..close];
+                    if bracket_content.contains('/') {
+                        let parts: Vec<&str> = bracket_content.split('/').collect();
+                        if parts.len() == 2
+                            && parts[0].trim().parse::<u32>().is_ok()
+                            && parts[1].trim().parse::<u32>().is_ok()
+                        {
+                            continue;
+                        }
                     }
                 }
             }
@@ -147,7 +148,10 @@ pub fn run_pm_ls(args: &[String], verbose: u8) -> Result<()> {
 
     // Try JSON first
     let mut cmd = Command::new("bun");
-    cmd.arg("pm").arg("ls").arg("--json");
+    cmd.arg("pm").arg("ls");
+    if !args.iter().any(|a| a == "--json") {
+        cmd.arg("--json");
+    }
 
     for arg in args {
         cmd.arg(arg);
@@ -210,14 +214,15 @@ pub fn run_run(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let filtered = filter_bun_install(&raw);
-    println!("{}", filtered);
+    // Passthrough — script output is unpredictable, don't filter
+    print!("{}", stdout);
+    eprint!("{}", stderr);
 
     timer.track(
         &format!("bun run {}", args.join(" ")),
         &format!("rtk bun run {}", args.join(" ")),
         &raw,
-        &filtered,
+        &raw,
     );
 
     if !output.status.success() {
@@ -324,5 +329,32 @@ mod tests {
         let json = "{}";
         let result = filter_bun_pm_ls_json(json);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_filter_bun_install_preserves_errors() {
+        let output = r#"bun install v1.1.0
+[1/4] Resolving packages...
+error: PackageNotFound - "nonexistent-pkg" not found in registry
+"#;
+        let result = filter_bun_install(output);
+        assert!(result.contains("error:"));
+        assert!(result.contains("nonexistent-pkg"));
+    }
+
+    #[test]
+    fn test_filter_bun_pm_ls_json_invalid() {
+        let result = filter_bun_pm_ls_json("not json");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_filter_bun_pm_ls_text_truncates() {
+        let long_output = (0..100)
+            .map(|i| format!("pkg-{i}@1.0.0"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_bun_pm_ls_text(&long_output);
+        assert!(result.len() <= 520); // truncate adds "..." suffix
     }
 }

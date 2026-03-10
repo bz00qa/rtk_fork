@@ -217,7 +217,11 @@ pub fn ok_confirmation(action: &str, detail: &str) -> String {
 /// ```
 #[allow(dead_code)]
 pub fn detect_package_manager() -> &'static str {
-    if std::path::Path::new("pnpm-lock.yaml").exists() {
+    if std::path::Path::new("bun.lockb").exists() {
+        "bun"
+    } else if std::path::Path::new("deno.lock").exists() {
+        "deno"
+    } else if std::path::Path::new("pnpm-lock.yaml").exists() {
         "pnpm"
     } else if std::path::Path::new("yarn.lock").exists() {
         "yarn"
@@ -240,6 +244,16 @@ pub fn package_manager_exec(tool: &str) -> Command {
     } else {
         let pm = detect_package_manager();
         match pm {
+            "bun" => {
+                let mut c = Command::new("bunx");
+                c.arg(tool);
+                c
+            }
+            "deno" => {
+                let mut c = Command::new("deno");
+                c.arg("run").arg("-A").arg(format!("npm:{tool}"));
+                c
+            }
             "pnpm" => {
                 let mut c = Command::new("pnpm");
                 c.arg("exec").arg("--").arg(tool);
