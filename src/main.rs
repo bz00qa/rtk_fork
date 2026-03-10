@@ -265,6 +265,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Deno runtime commands with compact output
+    #[command(display_order = 43)]
+    Deno {
+        #[command(subcommand)]
+        command: DenoCommands,
+    },
+
     /// Pip package manager with compact output (auto-detects uv)
     #[command(display_order = 44)]
     Pip {
@@ -302,6 +309,21 @@ enum Commands {
     Prisma {
         #[command(subcommand)]
         command: PrismaCommands,
+    },
+
+    /// Bun runtime commands with compact output
+    #[command(display_order = 54)]
+    Bun {
+        #[command(subcommand)]
+        command: BunCommands,
+    },
+
+    /// bunx with passthrough + auto-filter
+    #[command(display_order = 55)]
+    Bunx {
+        /// bunx arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     // ── Files & Search ───────────────────────────────────────
@@ -1032,6 +1054,90 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum BunCommands {
+    /// Install packages (filter progress bars)
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run scripts
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build project (errors only)
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with compact output (failures only)
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Add packages
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Remove packages
+    Remove {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package manager commands (pm ls, etc.)
+    Pm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported bun subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum DenoCommands {
+    /// Run a script
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Type-check without running
+    Check {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Lint source files
+    Lint {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run tests (failures only)
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run a task from deno.json
+    Task {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile to standalone executable (errors only)
+    Compile {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install dependencies
+    Install {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1908,6 +2014,85 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Bun { command } => match command {
+            BunCommands::Install { args }
+            | BunCommands::Add { args }
+            | BunCommands::Remove { args } => {
+                bun_cmd::run_install(&args, cli.verbose)?;
+            }
+            BunCommands::Run { args } => {
+                bun_cmd::run_run(&args, cli.verbose)?;
+            }
+            BunCommands::Build { args } => {
+                let cmd = format!("bun build {}", args.join(" "));
+                runner::run_err(&cmd, cli.verbose)?;
+            }
+            BunCommands::Test { args } => {
+                let cmd = format!("bun test {}", args.join(" "));
+                runner::run_test(&cmd, cli.verbose)?;
+            }
+            BunCommands::Pm { args } => {
+                if args.first().map(|s| s.as_str()) == Some("ls") {
+                    bun_cmd::run_pm_ls(&args[1..], cli.verbose)?;
+                } else {
+                    bun_cmd::run_other(
+                        &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                        cli.verbose,
+                    )?;
+                }
+            }
+            BunCommands::Other(args) => {
+                bun_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
+
+        Commands::Bunx { args } => {
+            if args.is_empty() {
+                anyhow::bail!("bunx requires a command argument");
+            }
+            match args[0].as_str() {
+                "tsc" | "typescript" => {
+                    tsc_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "eslint" => {
+                    lint_cmd::run(&args[1..], cli.verbose)?;
+                }
+                _ => {
+                    let cmd = format!("bunx {}", args.join(" "));
+                    runner::run_err(&cmd, cli.verbose)?;
+                }
+            }
+        }
+
+        Commands::Deno { command } => match command {
+            DenoCommands::Test { args } => {
+                let cmd = format!("deno test {}", args.join(" "));
+                runner::run_test(&cmd, cli.verbose)?;
+            }
+            DenoCommands::Check { args } => {
+                deno_cmd::run_check(&args, cli.verbose)?;
+            }
+            DenoCommands::Lint { args } => {
+                deno_cmd::run_lint(&args, cli.verbose)?;
+            }
+            DenoCommands::Run { args } | DenoCommands::Task { args } => {
+                deno_cmd::run_task(&args, cli.verbose)?;
+            }
+            DenoCommands::Compile { args } => {
+                let cmd = format!("deno compile {}", args.join(" "));
+                runner::run_err(&cmd, cli.verbose)?;
+            }
+            DenoCommands::Install { args } => {
+                deno_cmd::run_other(
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    cli.verbose,
+                )?;
+            }
+            DenoCommands::Other(args) => {
+                deno_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
+
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
@@ -2143,6 +2328,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Bun { .. }
+            | Commands::Bunx { .. }
+            | Commands::Deno { .. }
             | Commands::Gt { .. }
             | Commands::Proxy { .. }
     )
