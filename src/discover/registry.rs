@@ -512,16 +512,50 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
-            let rewritten = if rest.is_empty() {
+            let cleaned_rest = strip_verbose_flags(rest, rule.rtk_cmd);
+            let rewritten = if cleaned_rest.is_empty() {
                 format!("{}{}", env_prefix, rule.rtk_cmd)
             } else {
-                format!("{}{} {}", env_prefix, rule.rtk_cmd, rest)
+                format!("{}{} {}", env_prefix, rule.rtk_cmd, cleaned_rest)
             };
             return Some(rewritten);
         }
     }
 
     None
+}
+
+/// Commands where `-v` does NOT mean "verbose" and should not be stripped.
+/// For these commands, `-v` typically means "invert match".
+const VERBOSE_FLAG_DENYLIST: &[&str] = &["rtk grep"];
+
+/// Strip verbose flags from command args to reduce token-heavy output.
+///
+/// Removes `-v`, `-vv`, `-vvv`, `--verbose`, and `--debug` as standalone tokens.
+/// Skips stripping for commands in `VERBOSE_FLAG_DENYLIST` where `-v` has
+/// different semantics (e.g., `grep -v` = invert match).
+fn strip_verbose_flags(args: &str, rtk_cmd: &str) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+
+    // Don't strip for commands where -v means something else
+    if VERBOSE_FLAG_DENYLIST.contains(&rtk_cmd) {
+        return args.to_string();
+    }
+
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let filtered: Vec<&str> = tokens
+        .into_iter()
+        .filter(|token| {
+            !matches!(
+                *token,
+                "-v" | "-vv" | "-vvv" | "-vvvv" | "--verbose" | "--debug"
+            )
+        })
+        .collect();
+
+    filtered.join(" ")
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -2331,5 +2365,79 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // --- Verbose flag stripping ---
+
+    #[test]
+    fn test_strip_verbose_v_from_cargo_test() {
+        assert_eq!(strip_verbose_flags("-v", "rtk cargo"), "");
+    }
+
+    #[test]
+    fn test_strip_verbose_vv_from_git_log() {
+        assert_eq!(strip_verbose_flags("-vv --oneline", "rtk git"), "--oneline");
+    }
+
+    #[test]
+    fn test_strip_verbose_long_flag() {
+        assert_eq!(
+            strip_verbose_flags("--verbose --cached", "rtk git"),
+            "--cached"
+        );
+    }
+
+    #[test]
+    fn test_strip_debug_flag() {
+        assert_eq!(
+            strip_verbose_flags("--debug test_name", "rtk cargo"),
+            "test_name"
+        );
+    }
+
+    #[test]
+    fn test_strip_verbose_preserves_grep_v() {
+        // grep -v means "invert match", NOT verbose — must not strip
+        assert_eq!(
+            strip_verbose_flags("-v pattern file.rs", "rtk grep"),
+            "-v pattern file.rs"
+        );
+    }
+
+    #[test]
+    fn test_strip_verbose_empty_args() {
+        assert_eq!(strip_verbose_flags("", "rtk git"), "");
+    }
+
+    #[test]
+    fn test_strip_verbose_no_flags_passthrough() {
+        assert_eq!(
+            strip_verbose_flags("status --short", "rtk git"),
+            "status --short"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_strips_verbose_from_cargo() {
+        assert_eq!(
+            rewrite_command("cargo test -v", &[]),
+            Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_strips_verbose_from_git_log() {
+        assert_eq!(
+            rewrite_command("git log --verbose -10", &[]),
+            Some("rtk git log -10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_grep_invert() {
+        assert_eq!(
+            rewrite_command("rg -v pattern src/", &[]),
+            Some("rtk grep -v pattern src/".into())
+        );
     }
 }

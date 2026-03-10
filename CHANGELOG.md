@@ -61,10 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **lockfile detection**: `bun.lockb` and `deno.lock` recognized in package manager auto-detection
 * **analytics**: bun/bunx/deno tracked in `rtk gain` dashboard and `rtk discover` reports
 
+### Verbose Flag Stripping
+* **auto-strip verbose flags**: hook silently removes `-v`, `-vv`, `-vvv`, `--verbose`, `--debug` from rewritten commands to prevent token-heavy output
+* **smart denylist**: commands where `-v` has different semantics (e.g., `grep -v` = invert match) are excluded from stripping
+
 ### Other
 * **dependency updates**: colored 2→3, dirs 5→6, rusqlite 0.31→0.38, toml 0.8→1, thiserror 1→2, ureq 2→3 + all transitives
 * **0 warnings**: fixed all 32 compiler warnings across codebase
-* **820 tests**: up from ~607 in upstream
+* **830 tests**: up from ~607 in upstream
 
 ## [0.27.2](https://github.com/rtk-ai/rtk/compare/v0.27.1...v0.27.2) (2026-03-06)
 

@@ -360,6 +360,9 @@ Repeated proxy commands within a configurable TTL (default 5 min) show a diff ag
 ### Repeat Alerting
 When the same command runs 3+ times within 10 minutes, RTK suggests using `rtk watch` instead for change-only output.
 
+### Verbose Flag Stripping
+The hook automatically strips verbose flags (`-v`, `-vv`, `--verbose`, `--debug`) from commands before execution to prevent token-heavy output. Commands where `-v` has different semantics (e.g., `grep -v` = invert match) are excluded.
+
 ## Configuration
 
 ### Config File
