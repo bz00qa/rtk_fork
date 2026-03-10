@@ -5,6 +5,37 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.2-mod5] Fork Enhancements (2026-03-10)
+
+### New Commands
+* **context**: `rtk context` — combined git status + diff + log in one call
+* **dedup**: `rtk dedup` — collapse repeated/noisy output lines
+* **watch**: `rtk watch <cmd>` — show only changes since last run
+* **read --diet**: markdown token reduction mode (strip filler words)
+
+### Smart Proxy Features
+* **auto-filter**: generic noise reduction for all proxy commands — ANSI strip, CR overwrite removal, decorative separator stripping (═══, ───), blank line collapse, noise pattern dedup, smart truncation (head + tail)
+* **auto-cache**: repeated proxy commands within TTL (default 5 min) show diff against previous run instead of full output. Configurable via `RTK_CACHE_TTL` env or `[cache]` config section
+* **repeat alerting**: hint `rtk watch` when same command runs 3+ times within 10 minutes
+
+### Gain Dashboard
+* **cache performance section**: shows cache hit count, tokens avoided, and hit rate (separate from filter savings)
+* **cache-hit tracking**: cache hits tagged in DB (`cache_hit` column), excluded from main savings aggregation to prevent inflated percentages
+* **routing breakdown**: now shows dedicated filters vs proxy auto-filter vs cache hits
+
+### Discover Improvements
+* **colorized output**: bold green headers, cyan commands, tiered percentage colors (green/yellow/red), bright white token counts — matching `rtk gain` style
+* **output attribution fix**: compound commands (`PATH=... && cd ... && npm build`) now attribute output tokens only to the effective command, not all segments
+* **consumer grouping fix**: `python -m pytest` and `pnpm --filter X build` now properly classified in Top Token Consumers
+* **pattern opportunities**: detect context, watch, dedup usage patterns
+
+### Other
+* **native hook-rewrite**: cross-platform `rtk hook-rewrite` command replaces bash+jq hook
+* **Windows init**: slim RTK.md on Windows matching Unix behavior
+* **dependency updates**: colored 2→3, dirs 5→6, rusqlite 0.31→0.38, toml 0.8→1, thiserror 1→2, ureq 2→3 + all transitives
+* **0 warnings**: fixed all 32 compiler warnings across codebase
+* **811 tests**: up from ~607 in upstream
+
 ## [0.27.2](https://github.com/rtk-ai/rtk/compare/v0.27.1...v0.27.2) (2026-03-06)
 
 

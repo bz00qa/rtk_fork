@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.27.1"
+rtk --version   # Should show "rtk 0.27.2" (or newer)
 rtk gain        # Should show token savings stats
 ```
 
@@ -134,6 +134,7 @@ Four strategies applied per command type:
 rtk ls .                        # Token-optimized directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk read file.rs --diet         # Markdown token reduction (strip filler)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
@@ -214,15 +215,22 @@ rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```
 
+### Workflow Optimization
+```bash
+rtk context                     # Combined status+diff+log in one call
+rtk dedup                       # Collapse repeated/noisy output lines
+rtk watch <cmd>                 # Show only changes since last run
+```
+
 ### Token Savings Analytics
 ```bash
-rtk gain                        # Summary stats
+rtk gain                        # Colored dashboard with cache stats
 rtk gain --graph                # ASCII graph (last 30 days)
 rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown
 rtk gain --all --format json    # JSON export for dashboards
 
-rtk discover                    # Find missed savings opportunities
+rtk discover                    # Colorized missed savings report
 rtk discover --all --since 7    # All projects, last 7 days
 ```
 
@@ -305,7 +313,30 @@ After install, **restart Claude Code**.
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
-Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
+Commands already using `rtk`, heredocs (`<<`), and ignored commands (`cd`, `echo`, env assignments) pass through unchanged. Unrecognized commands are auto-routed through `rtk proxy --filter` for generic noise reduction (ANSI stripping, dedup, truncation).
+
+### Compound Commands
+
+The hook handles compound commands (`&&`, `||`, `;`, `|`) by rewriting each segment independently:
+
+```
+# Input:
+PATH="/c/Program Files/nodejs:$PATH" && cd frontend && npx vitest run 2>&1
+
+# Rewritten to:
+PATH="/c/Program Files/nodejs:$PATH" && cd frontend && rtk vitest run 2>&1
+```
+
+## Smart Proxy Features
+
+### Auto-Filter
+All proxy commands get automatic noise reduction: ANSI stripping, progress bar removal, decorative separator stripping, repeated line dedup, and smart truncation (head + tail preserved).
+
+### Auto-Cache
+Repeated proxy commands within a configurable TTL (default 5 min) show a diff against the previous run instead of full output. Disable with `RTK_CACHE=0` or configure TTL with `RTK_CACHE_TTL=10`.
+
+### Repeat Alerting
+When the same command runs 3+ times within 10 minutes, RTK suggests using `rtk watch` instead for change-only output.
 
 ## Configuration
 
@@ -324,6 +355,10 @@ exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
 max_files = 20          # rotation limit
+
+[cache]
+enabled = true          # auto-cache proxy commands (default: true)
+ttl_minutes = 5         # cache expiry in minutes (default: 5)
 ```
 
 ### Tee: Full Output Recovery
