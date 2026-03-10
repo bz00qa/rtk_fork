@@ -80,6 +80,13 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 cargo install --git https://github.com/rtk-ai/rtk
 ```
 
+### Windows (from source)
+
+```cmd
+install.cmd
+```
+> Requires Rust toolchain. Builds and installs to `%USERPROFILE%\.cargo\bin`.
+
 ### Pre-built Binaries
 
 Download from [releases](https://github.com/rtk-ai/rtk/releases):

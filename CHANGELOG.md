@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Windows Init Improvements
 * **native hook-rewrite**: cross-platform `rtk hook-rewrite` command replaces bash+jq hook — no shell dependencies on Windows
 * **slim RTK.md**: Windows `rtk init` now generates the same compact RTK.md as Unix (was previously bloated)
+* **install.cmd**: Windows batch installer — builds from source via `cargo install --path .`
 
 ### Other
 * **dependency updates**: colored 2→3, dirs 5→6, rusqlite 0.31→0.38, toml 0.8→1, thiserror 1→2, ureq 2→3 + all transitives
