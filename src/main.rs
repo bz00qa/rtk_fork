@@ -1,5 +1,6 @@
 mod auto_filter;
 mod aws_cmd;
+mod bun_cmd;
 mod cache;
 mod cargo_cmd;
 mod cc_economics;
