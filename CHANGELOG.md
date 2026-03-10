@@ -53,10 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **slim RTK.md**: Windows `rtk init` now generates the same compact RTK.md as Unix (was previously bloated)
 * **install.cmd**: Windows batch installer — builds from source via `cargo install --path .`
 
+### Bun & Deno Runtime Support
+* **bun commands**: `rtk bun install/add/remove` (progress filtering), `rtk bun test` (failures only), `rtk bun build` (errors only), `rtk bun run` (passthrough), `rtk bun pm ls` (JSON parsing, compact tree)
+* **bunx smart routing**: `rtk bunx tsc` → tsc filter, `rtk bunx eslint` → lint filter, others → error filter
+* **deno commands**: `rtk deno test` (failures only), `rtk deno lint/check` (errors only, tee recovery), `rtk deno task/run` (passthrough + filter), `rtk deno compile` (errors only)
+* **hook rewriting**: bun/bunx/deno commands auto-rewritten by Claude Code hook (20+ subcommand variants)
+* **lockfile detection**: `bun.lockb` and `deno.lock` recognized in package manager auto-detection
+* **analytics**: bun/bunx/deno tracked in `rtk gain` dashboard and `rtk discover` reports
+
 ### Other
 * **dependency updates**: colored 2→3, dirs 5→6, rusqlite 0.31→0.38, toml 0.8→1, thiserror 1→2, ureq 2→3 + all transitives
 * **0 warnings**: fixed all 32 compiler warnings across codebase
-* **811 tests**: up from ~607 in upstream
+* **820 tests**: up from ~607 in upstream
 
 ## [0.27.2](https://github.com/rtk-ai/rtk/compare/v0.27.1...v0.27.2) (2026-03-06)
 

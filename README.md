@@ -176,6 +176,8 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk bun test                    # Bun tests (failures only)
+rtk deno test                   # Deno tests (failures only)
 ```
 
 ### Build & Lint
@@ -189,11 +191,17 @@ rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk deno lint                   # Deno linting (errors only)
+rtk deno check                  # Deno type-check (errors only)
 ```
 
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk bun install                 # Filtered install (strip progress)
+rtk bun pm ls                   # Compact dependency tree (JSON)
+rtk bunx <tool>                 # Smart routing (tsc, eslint → filters)
+rtk deno task <name>            # Run deno tasks
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk prisma generate             # Schema generation (no ASCII art)
@@ -320,6 +328,9 @@ After install, **restart Claude Code**.
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
+| `bun install/test/build/run/pm` | `rtk bun ...` |
+| `bunx <tool>` | `rtk bunx ...` |
+| `deno test/lint/check/run/task` | `rtk deno ...` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and ignored commands (`cd`, `echo`, env assignments) pass through unchanged. Unrecognized commands are auto-routed through `rtk proxy --filter` for generic noise reduction (ANSI stripping, dedup, truncation).
