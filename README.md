@@ -287,6 +287,8 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+> **Windows support**: `rtk init` uses the native `rtk hook-rewrite` command (no bash/jq dependency) and generates a slim RTK.md matching Unix behavior. Works in Git Bash, PowerShell, and cmd.
+
 ### Commands Rewritten
 
 | Raw Command | Rewritten To |

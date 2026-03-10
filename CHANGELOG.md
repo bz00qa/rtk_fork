@@ -29,9 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **consumer grouping fix**: `python -m pytest` and `pnpm --filter X build` now properly classified in Top Token Consumers
 * **pattern opportunities**: detect context, watch, dedup usage patterns
 
+### Windows Init Improvements
+* **native hook-rewrite**: cross-platform `rtk hook-rewrite` command replaces bash+jq hook — no shell dependencies on Windows
+* **slim RTK.md**: Windows `rtk init` now generates the same compact RTK.md as Unix (was previously bloated)
+
 ### Other
-* **native hook-rewrite**: cross-platform `rtk hook-rewrite` command replaces bash+jq hook
-* **Windows init**: slim RTK.md on Windows matching Unix behavior
 * **dependency updates**: colored 2→3, dirs 5→6, rusqlite 0.31→0.38, toml 0.8→1, thiserror 1→2, ureq 2→3 + all transitives
 * **0 warnings**: fixed all 32 compiler warnings across codebase
 * **811 tests**: up from ~607 in upstream
