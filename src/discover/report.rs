@@ -189,12 +189,16 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
         for entry in report.supported.iter().take(limit) {
             out.push_str(&format!(
-                "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
-                style_cmd(&truncate_str(&entry.command, 23)),
+                "{} {:>5}    {} {:<13} ~{}\n",
+                pad_right(&truncate_str(&entry.command, 23), 24, style_cmd),
                 entry.count,
-                style_cmd(entry.rtk_equivalent),
+                pad_right(entry.rtk_equivalent, 18, style_cmd),
                 entry.rtk_status.as_str(),
-                style_tokens(&format_tokens(entry.estimated_savings_tokens)),
+                pad_left(
+                    &format_tokens(entry.estimated_savings_tokens),
+                    12,
+                    style_tokens
+                ),
             ));
         }
 
@@ -267,12 +271,12 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
                 }
             };
             out.push_str(&format!(
-                " {:>2}.  {:<22} {:>5}  {:>9} {:>9}   {}\n",
+                " {:>2}.  {} {:>5}  {} {}   {}\n",
                 i + 1,
-                style_cmd(&truncate_str(&c.command, 22)),
+                pad_right(&truncate_str(&c.command, 22), 22, style_cmd),
                 c.count,
-                style_tokens(&format_tokens(c.total_tokens)),
-                style_tokens(&format_tokens(c.avg_tokens)),
+                pad_left(&format_tokens(c.total_tokens), 9, style_tokens),
+                pad_left(&format_tokens(c.avg_tokens), 9, style_tokens),
                 rtk_label,
             ));
         }
@@ -306,8 +310,8 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
         for entry in report.unsupported.iter().take(limit) {
             out.push_str(&format!(
-                "{:<24} {:>5}    {}\n",
-                style_cmd(&truncate_str(&entry.base_command, 23)),
+                "{} {:>5}    {}\n",
+                pad_right(&truncate_str(&entry.base_command, 23), 24, style_cmd),
                 entry.count,
                 truncate_str(&entry.example, 40),
             ));
@@ -359,5 +363,153 @@ fn truncate_str(s: &str, max: usize) -> String {
             .map(|(_, c)| c)
             .collect();
         format!("{}..", truncated)
+    }
+}
+
+/// Pad text to `width` (left-aligned) BEFORE applying ANSI styling.
+/// This ensures format alignment is correct regardless of escape sequences.
+fn pad_right(text: &str, width: usize, styler: fn(&str) -> String) -> String {
+    let padded = format!("{:<width$}", text, width = width);
+    // Split into visible content and trailing spaces
+    let visible_len = text.len().min(width);
+    let trailing = &padded[visible_len..];
+    format!("{}{}", styler(&padded[..visible_len]), trailing)
+}
+
+/// Pad text to `width` (right-aligned) BEFORE applying ANSI styling.
+fn pad_left(text: &str, width: usize, styler: fn(&str) -> String) -> String {
+    if text.len() >= width {
+        return styler(text);
+    }
+    let padding = width - text.len();
+    format!("{}{}", " ".repeat(padding), styler(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Identity styler for testing (no ANSI codes)
+    fn no_style(s: &str) -> String {
+        s.to_string()
+    }
+
+    #[test]
+    fn test_pad_right_shorter_text() {
+        let result = pad_right("hello", 10, no_style);
+        assert_eq!(result, "hello     ");
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_pad_right_exact_width() {
+        let result = pad_right("hello", 5, no_style);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_pad_left_shorter_text() {
+        let result = pad_left("42", 5, no_style);
+        assert_eq!(result, "   42");
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn test_pad_left_exact_width() {
+        let result = pad_left("hello", 5, no_style);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_pad_right_with_ansi_preserves_visual_width() {
+        // Simulate ANSI styling that adds escape codes
+        fn fake_ansi(s: &str) -> String {
+            format!("\x1b[1;96m{}\x1b[0m", s)
+        }
+        let result = pad_right("git", 10, fake_ansi);
+        // Should have ANSI around "git" then 7 trailing spaces
+        assert!(result.starts_with("\x1b[1;96mgit\x1b[0m"));
+        assert!(result.ends_with("       "));
+        // Visual width: 3 (git) + 7 (spaces) = 10
+    }
+
+    #[test]
+    fn test_pad_left_with_ansi_preserves_visual_width() {
+        fn fake_ansi(s: &str) -> String {
+            format!("\x1b[97m{}\x1b[0m", s)
+        }
+        let result = pad_left("42", 8, fake_ansi);
+        // Should have 6 spaces then ANSI "42"
+        assert!(result.starts_with("      \x1b[97m42\x1b[0m"));
+    }
+
+    #[test]
+    fn test_format_text_table_alignment() {
+        // Build a minimal report with varied-length data
+        let report = DiscoverReport {
+            supported: vec![
+                SupportedEntry {
+                    command: "git status".into(),
+                    count: 42,
+                    rtk_equivalent: "rtk git",
+                    category: "Git",
+                    rtk_status: RtkStatus::Existing,
+                    estimated_savings_pct: 70.0,
+                    estimated_savings_tokens: 1500,
+                },
+                SupportedEntry {
+                    command: "cargo test filter::".into(),
+                    count: 3,
+                    rtk_equivalent: "rtk cargo",
+                    category: "Cargo",
+                    rtk_status: RtkStatus::Existing,
+                    estimated_savings_pct: 90.0,
+                    estimated_savings_tokens: 250000,
+                },
+            ],
+            unsupported: vec![],
+            consumers: vec![],
+            patterns: vec![],
+            total_commands: 100,
+            sessions_scanned: 5,
+            already_rtk: 0,
+            since_days: 90,
+            parse_errors: 0,
+        };
+
+        // Non-TTY output has no ANSI codes — verify columns align
+        let output = format_text(&report, 20, false);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Find header and data rows in MISSED SAVINGS table
+        let header_line = lines
+            .iter()
+            .find(|l| l.contains("Command") && l.contains("Count"))
+            .expect("header not found");
+        let data_line_1 = lines
+            .iter()
+            .find(|l| l.contains("git status"))
+            .expect("git status row not found");
+        let data_line_2 = lines
+            .iter()
+            .find(|l| l.contains("cargo test"))
+            .expect("cargo test row not found");
+
+        // Verify column alignment by checking "RTK Equivalent" column position
+        let header_rtk_pos = header_line.find("RTK Equivalent").unwrap();
+        let data1_rtk_pos = data_line_1.find("rtk git").unwrap();
+        let data2_rtk_pos = data_line_2.find("rtk cargo").unwrap();
+
+        // RTK Equivalent column should start at same position in all rows
+        assert_eq!(
+            data1_rtk_pos, data2_rtk_pos,
+            "RTK Equivalent column misaligned:\n  '{}'\n  '{}'",
+            data_line_1, data_line_2
+        );
+        assert_eq!(
+            header_rtk_pos, data1_rtk_pos,
+            "Header vs data RTK column misaligned:\n  '{}'\n  '{}'",
+            header_line, data_line_1
+        );
     }
 }
