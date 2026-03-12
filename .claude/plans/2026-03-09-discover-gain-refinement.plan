@@ -1,0 +1,144 @@
+# Discover + Gain Refinement Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** (1) Reorder discover sections, add Top Token Consumers, remove Auto-Mode Coverage. (2) Add Routing Breakdown to gain.
+
+**Architecture:** Discover changes are in report.rs (formatting) and mod.rs (aggregation). Gain changes are in gain.rs (new section using existing tracking DB data + COMMAND_REGISTRY).
+
+**Tech Stack:** Rust, existing discover/gain infrastructure.
+
+---
+
+### Task 1: Reorder discover sections and remove AUTO-MODE COVERAGE
+
+**Files:**
+- Modify: `src/discover/report.rs` (reorder format_text sections, remove auto-mode)
+
+**What to change in `format_text()`:**
+
+Current order: MISSED SAVINGS → UNHANDLED → PATTERNS → AUTO-MODE → TOTAL
+New order: MISSED SAVINGS → PATTERNS → TOTAL SAVEABLE → TOP UNHANDLED
+
+Remove the entire AUTO-MODE COVERAGE section (lines 211-262 in report.rs).
+Move PATTERNS section before UNHANDLED.
+Move TOTAL SAVEABLE line between PATTERNS and UNHANDLED.
+
+**Steps:**
+1. Read `src/discover/report.rs`
+2. Reorder: missed savings block → patterns block → grand total line → unhandled block
+3. Remove the auto-mode coverage block entirely
+4. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+5. Do NOT commit
+
+---
+
+### Task 2: Add Top Token Consumers section to discover
+
+**Files:**
+- Modify: `src/discover/report.rs` (add new struct + format section)
+- Modify: `src/discover/mod.rs` (aggregate output_len per base command)
+
+**New struct in report.rs:**
+
+```rust
+/// A command ranked by total output tokens consumed.
+#[derive(Debug, Serialize)]
+pub struct TokenConsumer {
+    pub command: String,
+    pub count: usize,
+    pub total_tokens: usize,
+    pub avg_tokens: usize,
+    pub has_rtk_filter: bool,
+}
+```
+
+Add `pub consumers: Vec<TokenConsumer>` field to `DiscoverReport`.
+
+**Aggregation in mod.rs:**
+
+After the main command loop, aggregate ALL extracted commands (not just supported/unsupported) by base command:
+- Group by first 2-3 words of command
+- Sum `output_len / 4` as total_tokens per group
+- Sort by total_tokens descending, take top 10
+- Set `has_rtk_filter` by checking if the command matches any Classification::Supported
+
+**Format section in report.rs `format_text()`:**
+
+Add after TOTAL SAVEABLE, before TOP UNHANDLED:
+
+```
+TOP TOKEN CONSUMERS (by output size)
+────────────────────────────────────────────────────────────────────────
+  #  Command               Count    Total       Avg     RTK?
+────────────────────────────────────────────────────────────────────────
+ 1.  go test                 1919    1.7M      890      Yes
+ 2.  git log                 1954  575.0K      294      Yes
+...
+────────────────────────────────────────────────────────────────────────
+```
+
+**Steps:**
+1. Read both files
+2. Add TokenConsumer struct and field to report
+3. Add aggregation logic in mod.rs
+4. Add format section in report.rs format_text()
+5. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+6. Do NOT commit
+
+---
+
+### Task 3: Add Routing Breakdown section to rtk gain
+
+**Files:**
+- Modify: `src/gain.rs` (add section after Command Coverage)
+
+**Logic:**
+
+Using the `all_commands` data already fetched for Command Coverage (from `get_by_command_all()`), classify each base_cmd:
+
+- If `base_cmd` contains "proxy" → Proxy auto-filter count
+- Else if 2nd word of `base_cmd` is in COMMAND_REGISTRY → Dedicated filter count
+- Else → Other/unclassified count
+
+**Output format:**
+
+```
+Routing Breakdown
+────────────────────────────────────────────────────────
+  Dedicated filters:     312 commands (specialized output)
+  Passthrough (proxy):     4 commands (ANSI/dedup/truncate)
+  Other:                  44 commands
+────────────────────────────────────────────────────────
+```
+
+Add `print_routing_breakdown()` function and call it right after `print_command_coverage()`.
+
+**Steps:**
+1. Read `src/gain.rs` current state
+2. Add `print_routing_breakdown()` function
+3. Wire call after `print_command_coverage(&all_commands);`
+4. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+5. Do NOT commit
+
+---
+
+### Task 4: Build, test, verify all changes
+
+**Steps:**
+1. Run full quality gate: `cargo fmt --all && cargo clippy --all-targets && cargo test`
+2. Install: `cargo install --path .`
+3. Verify: `rtk gain` — should show Routing Breakdown after Command Coverage
+4. Verify: `rtk discover --all` — should show new section order with Top Token Consumers
+5. Verify: `rtk discover --all` — should NOT show AUTO-MODE COVERAGE
+
+---
+
+## Summary
+
+| Task | Description | Files |
+|------|-------------|-------|
+| 1 | Reorder discover sections, remove auto-mode | report.rs |
+| 2 | Add Top Token Consumers to discover | report.rs, mod.rs |
+| 3 | Add Routing Breakdown to gain | gain.rs |
+| 4 | Build, test, verify | — |

@@ -1,0 +1,219 @@
+# Bun & Deno Runtime Support Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Add bun and deno runtime/package manager support to RTK with hybrid approach: passthrough + auto-filter for most commands, JSON parsing for `bun pm ls`, runner.rs delegation for test/build.
+
+**Architecture:** Two thin command modules (`bun_cmd.rs`, `deno_cmd.rs`) following the Go sub-enum pattern. Each has a `Commands` enum with specialized subcommands plus `Other` external_subcommand for passthrough. Most delegate to `runner.rs` (test/err) or do simple passthrough with auto-filter. Only `bun pm ls` gets JSON parsing. Registry rules enable hook rewriting. PATTERNS and RULES arrays must stay in sync (index-based matching).
+
+**Tech Stack:** Rust, clap (derive), serde_json (bun pm ls), rusqlite (tracking), existing runner.rs/tee.rs
+
+---
+
+### Task 1: Create `bun_cmd.rs` with install filter, pm ls JSON, run passthrough, and other passthrough
+
+**Files:**
+- Create: `src/bun_cmd.rs`
+
+**Step 1: Create module with filter functions and tests (TDD - write tests first)**
+
+Create `src/bun_cmd.rs`. Include `filter_bun_install()` (strips progress bars like `[1/4] Resolving...`, version headers, empty lines), `filter_bun_pm_ls_json()` (parses JSON `HashMap<String, {version}>`, outputs `N deps\npkg@ver`), `filter_bun_pm_ls_text()` (text fallback with truncate to 500). Write 4+ unit tests covering: progress stripping, empty→"ok", JSON parsing, JSON empty→None.
+
+Follow patterns from: `npm_cmd.rs` (simple filter), `pnpm_cmd.rs:46-84` (JSON parsing with serde).
+
+**Step 2: Add public run functions**
+
+Add `run_install()`, `run_pm_ls()`, `run_run()`, `run_other()`. Each follows the pattern from `go_cmd.rs:40-90`: create Command, capture output, filter, track with `tracking::TimedExecution::start()` / `timer.track()`, preserve exit codes.
+
+**Step 3: Run `cargo test bun_cmd::tests` — verify all pass**
+
+**Step 4: Commit**
+```
+feat(bun): add bun_cmd.rs module with install filter and pm ls JSON parsing
+```
+
+---
+
+### Task 2: Create `deno_cmd.rs` with download/progress filter and run functions
+
+**Files:**
+- Create: `src/deno_cmd.rs`
+
+**Step 1: Create module with filter and tests**
+
+Create `src/deno_cmd.rs`. Include `filter_deno_output()` (strips `Download https://...` lines, empty lines). Write 2+ tests: download stripping, empty→"ok".
+
+**Step 2: Add public run functions**
+
+Add `run_lint()`, `run_check()`, `run_task()`, `run_other()`. `run_lint/check` use `tee::tee_and_hint()` for failure recovery (pattern from `go_cmd.rs:73-76`). `run_task` is simple passthrough+filter. `run_other` mirrors `go_cmd.rs:205-245`.
+
+**Step 3: Run `cargo test deno_cmd::tests` — verify all pass**
+
+**Step 4: Commit**
+```
+feat(deno): add deno_cmd.rs module with download/progress filtering
+```
+
+---
+
+### Task 3: Wire Bun and Deno into main.rs
+
+**Files:**
+- Modify: `src/main.rs`
+
+**Step 1: Add module declarations** (near line 38, alphabetical order)
+
+```rust
+mod bun_cmd;
+mod deno_cmd;
+```
+
+**Step 2: Add BunCommands and DenoCommands sub-enums**
+
+After `GoCommands` enum (~line 1035). Follow exact pattern from `GoCommands` (lines 1013-1035): each variant has `args: Vec<String>` with `trailing_var_arg = true, allow_hyphen_values = true`, plus `#[command(external_subcommand)] Other(Vec<OsString>)`.
+
+BunCommands: Install, Run, Build, Test, Add, Remove, Pm, Other
+DenoCommands: Run, Check, Lint, Test, Task, Compile, Install, Other
+
+**Step 3: Add Commands enum variants**
+
+After `Npx` (~line 296): `Bun { #[command(subcommand)] command: BunCommands }` (display_order = 54), `Bunx { args: Vec<String> }` (display_order = 55)
+After `GolangciLint` (~line 248): `Deno { #[command(subcommand)] command: DenoCommands }` (display_order = 43)
+
+**Step 4: Add routing match arms**
+
+After Go routing (~line 1879). Key routing:
+- `BunCommands::Test` → `runner::run_test("bun test ...")`
+- `BunCommands::Build` → `runner::run_err("bun build ...")`
+- `BunCommands::Pm` → check if first arg is "ls", route to `bun_cmd::run_pm_ls()`, else `run_other()`
+- `BunCommands::Install|Add|Remove` → `bun_cmd::run_install()`
+- `BunCommands::Run` → `bun_cmd::run_run()`
+- `Bunx` → smart routing like `Npx`: tsc→tsc_cmd, eslint→lint_cmd, else `runner::run_err()`
+- `DenoCommands::Test` → `runner::run_test("deno test ...")`
+- `DenoCommands::Compile` → `runner::run_err("deno compile ...")`
+- `DenoCommands::Lint` → `deno_cmd::run_lint()`
+- `DenoCommands::Check` → `deno_cmd::run_check()`
+- `DenoCommands::Task|Run` → `deno_cmd::run_task()`
+
+**Step 5: Add to skip_tracking match** (~line 2142)
+
+Add `| Commands::Bun { .. } | Commands::Bunx { .. } | Commands::Deno { .. }`
+
+**Step 6: Run `cargo build && cargo test` — verify compiles, all tests pass**
+
+**Step 7: Commit**
+```
+feat(main): wire bun/bunx/deno commands into CLI routing
+```
+
+---
+
+### Task 4: Add bun/deno patterns and rules to discover system
+
+**Files:**
+- Modify: `src/discover/rules.rs`
+
+**CRITICAL**: PATTERNS array and RULES array use index-based matching. New entries must be added at the same positions in both arrays. Count existing entries to find correct insertion point.
+
+**Step 1: Add regex patterns to PATTERNS array**
+
+After npx pattern (~line 21), add 3 new patterns:
+```rust
+r"^bun\s+(install|add|remove|run|build|test|dev|start|pm|create|upgrade|link|unlink|patch|exec|repl|init|outdated|publish|x)",
+r"^bunx\s+",
+r"^deno\s+(run|test|check|lint|fmt|compile|install|task|bench|doc|eval|info|cache|upgrade|uninstall|publish|add|remove|init)",
+```
+
+**Step 2: Add RtkRule entries to RULES array** at matching indices
+
+After npx rule (~line 210), add 3 rules:
+- Bun: rtk_cmd="rtk bun", rewrite_prefixes=&["bun"], category="PackageManager", savings_pct=75.0
+- Bunx: rtk_cmd="rtk bunx", rewrite_prefixes=&["bunx"], category="PackageManager", savings_pct=70.0
+- Deno: rtk_cmd="rtk deno", rewrite_prefixes=&["deno"], category="Languages", savings_pct=70.0
+
+Each with appropriate subcmd_savings and subcmd_status arrays (passthrough for dev/start/create/etc).
+
+**Step 3: Run `cargo test discover::` — verify no regressions**
+
+**Step 4: Commit**
+```
+feat(discover): add bun/bunx/deno patterns and rules for hook rewriting
+```
+
+---
+
+### Task 5: Add bun/deno to gain.rs COMMAND_REGISTRY and utils.rs lockfile detection
+
+**Files:**
+- Modify: `src/gain.rs` (~line 37-39, COMMAND_REGISTRY)
+- Modify: `src/utils.rs` (~line 219-227, detect_package_manager)
+
+**Step 1: Add to COMMAND_REGISTRY**
+
+After `("npx", "Package Managers")`:
+```rust
+("bun", "Package Managers"),
+("bunx", "Package Managers"),
+```
+After `("pip", "Languages")`:
+```rust
+("deno", "Languages"),
+```
+
+**Step 2: Update detect_package_manager()**
+
+Add `bun.lockb` and `deno.lock` checks before existing pnpm/yarn checks.
+
+**Step 3: Update package_manager_exec()**
+
+Add `"bun"` → `Command::new("bunx").arg(tool)` and `"deno"` → `Command::new("deno").arg("run").arg("-A").arg(format!("npm:{tool}"))` before pnpm arm.
+
+**Step 4: Run `cargo build && cargo test` — all pass**
+
+**Step 5: Commit**
+```
+feat(gain,utils): add bun/deno to analytics registry and lockfile detection
+```
+
+---
+
+### Task 6: Edge case tests and lint_cmd.rs verification
+
+**Files:**
+- Modify: `src/bun_cmd.rs` (add tests)
+- Modify: `src/deno_cmd.rs` (add tests)
+- Verify: `src/lint_cmd.rs:59` (bunx already in strip_pm_prefix — confirm, no change needed)
+
+**Step 1: Add edge case tests to bun_cmd.rs**
+
+- `test_filter_bun_install_preserves_errors`: error lines survive filtering
+- `test_filter_bun_pm_ls_json_empty`: `{}` → None
+
+**Step 2: Add edge case tests to deno_cmd.rs**
+
+- `test_filter_deno_preserves_errors`: error lines survive, downloads stripped
+- `test_filter_deno_check_success`: Check lines preserved
+
+**Step 3: Verify bunx in lint_cmd.rs:59**
+
+Read line 59. Confirm `"bunx"` is in `pm_names` array. No change needed.
+
+**Step 4: Run `cargo test` — all pass**
+
+**Step 5: Commit**
+```
+test(bun,deno): add edge case and integration tests
+```
+
+---
+
+### Task 7: Final quality gate
+
+**Step 1:** Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+**Step 2:** Fix any warnings or failures
+**Step 3:** Run `cargo install --path .`
+**Step 4:** Run `rtk --help` — verify bun, bunx, deno appear in command list
+**Step 5:** Commit if any fixes needed
+```
+chore: fix clippy warnings for bun/deno modules
+```

@@ -36,10 +36,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_unsupported_gets_proxy_filter() {
+    fn test_run_supported_terraform() {
+        // terraform is now supported via TOML filters (upstream v0.28+)
         assert_eq!(
             registry::rewrite_command("terraform plan", &[]),
-            Some("rtk proxy -f terraform plan".into())
+            Some("rtk terraform plan".into())
         );
     }
 
