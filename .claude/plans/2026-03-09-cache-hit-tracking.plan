@@ -1,0 +1,257 @@
+# Cache-Hit Tracking for rtk gain
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Tag cache-hit rows in the tracking DB so `rtk gain` can exclude them from main savings metrics and show them as a separate "Cache Performance" section.
+
+**Architecture:** Add `cache_hit INTEGER DEFAULT 0` column to the `commands` table. Add `record_cache_hit()` to `Tracker` and `track_cache_hit()` to `TimedExecution`. Filter `WHERE cache_hit = 0` in all existing aggregation queries. Add `get_cache_stats()` for the new dashboard section.
+
+**Tech Stack:** Rust, rusqlite, existing tracking/gain modules
+
+---
+
+### Task 1: Add `cache_hit` column migration to tracking.rs
+
+**Files:**
+- Modify: `src/tracking.rs:290-313` (after existing migrations in `Tracker::new()`)
+- Modify: `src/tracking.rs:387-398` (in `new_in_memory()`)
+
+**Step 1: Add migration in `Tracker::new()`**
+
+After the `base_cmd` migration (line ~313), add:
+
+```rust
+// Migration: add cache_hit column to distinguish cache hits from filter savings
+let _ = conn.execute(
+    "ALTER TABLE commands ADD COLUMN cache_hit INTEGER DEFAULT 0",
+    [],
+);
+```
+
+**Step 2: Add column in `new_in_memory()`**
+
+After the `base_cmd` ALTER (line ~398), add the same:
+
+```rust
+let _ = conn.execute(
+    "ALTER TABLE commands ADD COLUMN cache_hit INTEGER DEFAULT 0",
+    [],
+);
+```
+
+**Step 3: Run `cargo test tracking::tests` — verify no regressions**
+
+Expected: All existing tracking tests pass (migration is additive, default 0).
+
+**Step 4: Commit**
+
+```
+feat(tracking): add cache_hit column migration
+```
+
+---
+
+### Task 2: Add `record_cache_hit()` and `track_cache_hit()` methods
+
+**Files:**
+- Modify: `src/tracking.rs:434` (near `record()`)
+- Modify: `src/tracking.rs:1202` (near `TimedExecution::track()`)
+
+**Step 1: Write failing test**
+
+Add to `src/tracking.rs` `mod tests`:
+
+```rust
+#[test]
+fn test_cache_hit_recorded_separately() {
+    let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+    // Normal command
+    tracker.record("cargo build", "rtk proxy -f cargo build", 500, 100, 50)
+        .expect("record normal");
+
+    // Cache hit
+    tracker.record_cache_hit("cargo build", "rtk proxy -f cargo build", 500, 10, 30)
+        .expect("record cache hit");
+
+    let recent = tracker.get_recent(10).expect("get recent");
+    assert_eq!(recent.len(), 2);
+
+    // Verify cache_hit flag is set correctly
+    let cache_count: i64 = tracker.conn.query_row(
+        "SELECT COUNT(*) FROM commands WHERE cache_hit = 1", [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(cache_count, 1);
+
+    let normal_count: i64 = tracker.conn.query_row(
+        "SELECT COUNT(*) FROM commands WHERE cache_hit = 0", [], |r| r.get(0)
+    ).unwrap();
+    assert_eq!(normal_count, 1);
+}
+```
+
+**Step 2: Run test, verify it fails** (`record_cache_hit` doesn't exist yet)
+
+**Step 3: Implement `record_cache_hit()` on `Tracker`**
+
+Add after `record()` (around line 460). Same as `record()` but INSERT with `cache_hit = 1`.
+
+**Step 4: Implement `track_cache_hit()` on `TimedExecution`**
+
+Add after `track()` (around line 1216). Same as `track()` but calls `record_cache_hit()`.
+
+**Step 5: Run test, verify it passes**
+
+**Step 6: Commit**
+
+```
+feat(tracking): add record_cache_hit() and track_cache_hit()
+```
+
+---
+
+### Task 3: Wire `track_cache_hit()` in main.rs proxy path
+
+**Files:**
+- Modify: `src/main.rs:1968-1993` (proxy filter path where cache is used)
+
+**Step 1: Thread `was_cache_hit` bool from cache block**
+
+Change cache block to return `(final_output, was_cache_hit)` tuple. Use `track_cache_hit()` when true, regular `track()` when false.
+
+**Step 2: Run `cargo build` — verify it compiles**
+
+**Step 3: Run `cargo test` — verify no regressions**
+
+**Step 4: Commit**
+
+```
+feat(proxy): use track_cache_hit() for cache-hit tracking
+```
+
+---
+
+### Task 4: Exclude cache hits from main gain aggregation queries
+
+**Files:**
+- Modify: `src/tracking.rs` — all aggregation queries
+
+**Step 1: Write failing test**
+
+```rust
+#[test]
+fn test_cache_hits_excluded_from_summary() {
+    let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+    tracker.record("cmd", "rtk cargo build", 1000, 200, 50).unwrap();
+    tracker.record_cache_hit("cmd", "rtk proxy -f cargo build", 1000, 20, 30).unwrap();
+
+    let summary = tracker.get_summary_filtered(None).unwrap();
+    assert_eq!(summary.total_commands, 1);
+    assert_eq!(summary.total_input, 1000);
+    assert_eq!(summary.total_output, 200);
+    assert_eq!(summary.total_saved, 800);
+}
+```
+
+**Step 2: Add `AND cache_hit = 0` to all aggregation queries**
+
+Queries to update:
+- `get_summary_filtered()` — both the totals query and the by_command query
+- `get_by_command_all()`
+- `get_by_day()` / `get_all_days_filtered()`
+- `get_by_week_filtered()`
+- `get_by_month_filtered()`
+- `get_recent_filtered()`
+
+**Step 3: Run test, verify it passes**
+
+**Step 4: Commit**
+
+```
+fix(tracking): exclude cache hits from main savings aggregation
+```
+
+---
+
+### Task 5: Add `get_cache_stats()` method
+
+**Files:**
+- Modify: `src/tracking.rs` (new method on `Tracker`)
+
+**Step 1: Write failing test**
+
+```rust
+#[test]
+fn test_get_cache_stats() {
+    let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+    let (hits, avoided) = tracker.get_cache_stats(None).unwrap();
+    assert_eq!(hits, 0);
+    assert_eq!(avoided, 0);
+
+    tracker.record("cmd", "rtk cargo build", 1000, 200, 50).unwrap();
+    tracker.record_cache_hit("cmd", "rtk proxy -f cargo build", 1000, 20, 10).unwrap();
+    tracker.record_cache_hit("cmd", "rtk proxy -f cargo test", 500, 15, 8).unwrap();
+
+    let (hits, avoided) = tracker.get_cache_stats(None).unwrap();
+    assert_eq!(hits, 2);
+    assert_eq!(avoided, 1500);
+}
+```
+
+**Step 2: Implement**
+
+```rust
+pub fn get_cache_stats(&self, project_path: Option<&str>) -> Result<(usize, usize)> {
+    let (project_exact, project_glob) = project_filter_params(project_path);
+    let mut stmt = self.conn.prepare(
+        "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0)
+         FROM commands
+         WHERE cache_hit = 1
+           AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+    )?;
+    let (hits, avoided) = stmt.query_row(params![project_exact, project_glob], |row| {
+        Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize))
+    })?;
+    Ok((hits, avoided))
+}
+```
+
+**Step 3: Run test, verify it passes**
+
+**Step 4: Commit**
+
+```
+feat(tracking): add get_cache_stats() for cache performance metrics
+```
+
+---
+
+### Task 6: Add "Cache Performance" section to gain dashboard
+
+**Files:**
+- Modify: `src/gain.rs:264-270` (after command coverage, before routing breakdown)
+
+**Step 1: Add cache stats display after `print_command_coverage()`**
+
+Show Cache Performance section (only when cache_hits > 0): hit count, tokens avoided, hit rate.
+
+**Step 2: Update `print_routing_breakdown()` to accept and show cache_hits count**
+
+Add `cache_hits: usize` param, show "Cache hits: N commands (repeated output skipped)" line.
+
+**Step 3: Run `cargo build && cargo test`**
+
+**Step 4: Commit**
+
+```
+feat(gain): add Cache Performance section and routing breakdown
+```
+
+---
+
+### Task 7: Final quality gate
+
+**Step 1:** `cargo fmt --all && cargo clippy --all-targets && cargo test`
+**Step 2:** Fix any warnings or failures
+**Step 3:** `cargo install --path .`
+**Step 4:** Manual: `rtk gain` — verify cache section appears and main stats are clean

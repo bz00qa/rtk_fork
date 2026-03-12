@@ -1,0 +1,91 @@
+# RTK Gain Enhancement — "Realization Dashboard"
+
+**Date:** 2026-03-09
+**Status:** Approved
+
+## Philosophy
+
+- `rtk discover` = **potential** (what you *could* save)
+- `rtk gain` = **realization** (what you *are* saving)
+
+## Changes
+
+| Change | Type | Effort |
+|--------|------|--------|
+| Add Command Coverage section | New section | Medium |
+| Hardcoded command→category registry | New const | Small |
+| Aggregate tracking data by category | Query post-processing | Small |
+| Bridge tip to `rtk discover` | One-liner | Trivial |
+
+## Output Structure
+
+No changes to existing sections (KPIs, efficiency meter, By Command top-10). One new section added after By Command:
+
+```
+Command Coverage (10 / 45 commands used)
+────────────────────────────────────────────────────────────────────────
+  Category            Used/Avail   Count    Saved    Avg%   Unused
+────────────────────────────────────────────────────────────────────────
+  Git & VCS             4 / 6       129  586.6K   45.2%   gh, gt
+  Build & Compile       2 / 6        12    2.0K   95.7%   tsc, next, lint...
+  Test                  1 / 4        11    2.7M   96.2%   vitest, playwright...
+  Languages             1 / 5        11    2.7M   96.2%   golangci, ruff...
+  Files & Search        2 / 7       153   31.4K   77.9%   ls, grep, diff...
+  Analysis & Debug      0 / 7         0       0    —      err, json, deps...
+  Package Managers      0 / 4         0       0    —      pnpm, npm, npx...
+  Infrastructure        0 / 6         0       0    —      docker, kubectl...
+────────────────────────────────────────────────────────────────────────
+  Total: 10 / 45 used    428    3.4M   99.2%  ██████████
+
+  Tip: Run 'rtk discover' to find missed savings opportunities
+────────────────────────────────────────────────────────────────────────
+```
+
+## Architecture
+
+### 1. Command Registry
+
+A `const` array mapping each RTK command name to its category. Same categories as `--help` grouping. ~45 entries. Excludes meta/internal commands (gain, discover, init, verify, hook-rewrite, etc.).
+
+```rust
+const COMMAND_REGISTRY: &[(&str, &str)] = &[
+    ("git", "Git & VCS"),
+    ("gh", "Git & VCS"),
+    ("gt", "Git & VCS"),
+    ("cargo", "Build & Compile"),
+    ("tsc", "Build & Compile"),
+    // ...
+];
+```
+
+### 2. Category Aggregation (Rust-side)
+
+- Reuse existing `get_by_command()` which returns `(base_cmd, count, saved, avg_pct, avg_time)`
+- Post-process: extract command name from `base_cmd` (strip `rtk ` prefix), look up category in registry, bucket and sum
+- "Used" = distinct commands in tracking data that exist in registry
+- "Unused" = registry entries not in tracking data, show up to 3 names with `...` if more
+
+### 3. Display
+
+- New function `print_command_coverage(by_command_data)` in `gain.rs`
+- Reuses existing helpers: `format_tokens()`, `colorize_pct_cell()`, `mini_bar()`
+- Always shown in default output (no flag needed)
+
+### 4. Discover Bridge
+
+- Always print: `Tip: Run 'rtk discover' to find missed savings opportunities`
+- Static text, no dynamic calculation
+
+## Unchanged
+
+- All existing flags (--history, --graph, --quota, --daily, --weekly, --monthly, --all, --format, --failures, --project)
+- KPI section, efficiency meter, By Command top-10
+- Color coding thresholds (green >=70%, yellow >=40%, red <40%)
+- JSON/CSV export (coverage data added to JSON export)
+
+## Not Doing
+
+- No per-category savings thresholds
+- No separate `rtk stats` command
+- No dynamic recommendations beyond the discover tip
+- No test DB isolation fix

@@ -1,0 +1,106 @@
+# RTK Smart Proxy Enhancement — Design
+
+**Date:** 2026-03-09
+**Status:** Approved
+
+## Philosophy
+
+Make RTK's passthrough/proxy path significantly smarter — better auto-filtering for build output, automatic output caching with diff, and real-time repeat detection hints. These three changes work together to maximize savings on commands that don't have dedicated filters.
+
+## Changes
+
+| Change | Type | Effort |
+|--------|------|--------|
+| Smarter auto-filter pipeline | Enhance existing | Medium |
+| Auto-cache with diff (smart repeat) | New feature | Medium |
+| Session repeat alerting | New feature | Small |
+
+## Section 1: Smarter Auto-Filter for Build Output
+
+**Problem:** Passthrough commands (pnpm build, npm run, etc.) get ~40% savings from basic ANSI strip + dedup + truncate.
+
+**Solution:** Add pipeline stages to auto_filter.rs:
+- Strip progress bars/spinners (`[####...] 45%`, spinner chars)
+- Collapse consecutive "Compiling/Building" lines into count summary
+- Strip blank lines and decorative separators
+- Strip carriage-return overwritten lines (keep last)
+- Preserve errors, warnings, summary/timing lines
+
+**Target:** 60-70% savings on any build output without knowing the bundler.
+
+**Files:** `src/auto_filter.rs` (enhance existing pipeline)
+
+**Impact:** All passthrough commands automatically improve. No new commands needed.
+
+## Section 2: Auto-Cache with Diff
+
+**Problem:** Claude frequently re-runs the same build/test command within minutes. Each run produces near-identical output consuming full tokens.
+
+**Solution:** When a command runs that matches a recent execution (same base_cmd + args + cwd, within TTL):
+- Re-run the command (always execute — never skip)
+- Diff output against cached previous output
+- If identical: one-liner `[no changes since 2m ago]`
+- If changed: show only changed/new lines
+- First run: full filtered output (normal behavior)
+
+**Configuration:**
+```toml
+# ~/.config/rtk/config.toml
+[cache]
+enabled = true
+ttl_minutes = 5
+```
+
+Also via env: `RTK_CACHE_TTL=5`
+
+**Storage:** File-based cache in `~/.local/share/rtk/cache/`. Store output hash + content per (command_hash, cwd) pair. Auto-cleanup entries older than TTL.
+
+**Exclusions:** Don't cache inherently-changing commands (git status, git diff, git log). Only cache build/test/lint commands.
+
+**Files:** New `src/cache.rs` module, wire into command execution path.
+
+## Section 3: Session Repeat Alerting
+
+**Problem:** Claude runs the same command 5+ times in a session without using `rtk watch`. Users don't know about the optimization.
+
+**Solution:** On 3rd execution of same base_cmd within 1 hour, append stderr hint:
+```
+[repeated 3x — consider: rtk watch <cmd>]
+```
+
+**Rules:**
+- Trigger on 3rd occurrence within same hour (use tracking DB timestamps)
+- Only suggest for build/test/lint commands (not git status, cd, etc.)
+- One hint per command per session (don't nag on 4th, 5th run)
+- Hint on stderr (doesn't pollute filtered stdout)
+- Silenceable with `--quiet` flag or `RTK_QUIET=1` env var
+
+**Files:** Add hint logic to tracking.rs or new small module, wire into main execution path.
+
+## Architecture
+
+```
+Command execution flow:
+  1. Parse command
+  2. Check cache (Section 2) — has recent output for same cmd+cwd?
+  3. Execute command (always)
+  4. Auto-filter output (Section 1 — enhanced pipeline)
+  5. If cache hit: diff against cached, show only changes
+  6. Store output in cache
+  7. Track in DB + check repeat count (Section 3)
+  8. If 3rd repeat: emit stderr hint
+```
+
+## Unchanged
+
+- All existing dedicated filters (git, cargo, go, etc.)
+- Tracking DB schema (no changes needed for cache — separate storage)
+- CLI interface (no new flags except --quiet)
+- Hook rewrite system
+
+## Not Doing
+
+- No per-bundler parsers (auto-filter handles all generically)
+- No skip-execution caching (always re-run, just diff output)
+- No AI/LLM-based summarization
+- No config UI (toml + env var is sufficient)

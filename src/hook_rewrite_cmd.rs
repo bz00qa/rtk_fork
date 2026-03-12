@@ -116,10 +116,10 @@ mod tests {
 
     #[test]
     fn test_unsupported_gets_proxy_filter() {
-        let cmd = "terraform plan";
+        let cmd = "htop";
         assert_eq!(
             registry::rewrite_command(cmd, &[]),
-            Some("rtk proxy -f terraform plan".into())
+            Some("rtk proxy -f htop".into())
         );
     }
 

@@ -74,6 +74,8 @@ pub struct DiscoverReport {
     pub patterns: Vec<PatternOpportunity>,
     pub consumers: Vec<TokenConsumer>,
     pub parse_errors: usize,
+    pub rtk_disabled_count: usize,
+    pub rtk_disabled_examples: Vec<String>,
 }
 
 impl DiscoverReport {
@@ -327,6 +329,23 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
     }
 
+    // RTK_DISABLED bypass warning
+    if report.rtk_disabled_count > 0 {
+        out.push_str(&format!(
+            "\nRTK_DISABLED BYPASS -- {} commands ran without filtering\n",
+            report.rtk_disabled_count
+        ));
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+        out.push_str("These commands used RTK_DISABLED=1 unnecessarily:\n");
+        if !report.rtk_disabled_examples.is_empty() {
+            out.push_str(&format!("  {}\n", report.rtk_disabled_examples.join(", ")));
+        }
+        out.push_str("-> Remove RTK_DISABLED=1 to recover token savings\n");
+    }
+
+    out.push_str("\n~estimated from tool_result output sizes\n");
+
     if verbose && report.parse_errors > 0 {
         out.push_str(&format!(
             "\nParse errors skipped: {}\n",
@@ -475,6 +494,8 @@ mod tests {
             already_rtk: 0,
             since_days: 90,
             parse_errors: 0,
+            rtk_disabled_count: 0,
+            rtk_disabled_examples: vec![],
         };
 
         // Non-TTY output has no ANSI codes — verify columns align

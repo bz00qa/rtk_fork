@@ -1,5 +1,6 @@
 mod auto_filter;
 mod aws_cmd;
+mod binlog;
 mod bun_cmd;
 mod cache;
 mod cargo_cmd;
@@ -15,6 +16,9 @@ mod deps;
 mod diff_cmd;
 mod discover;
 mod display_helpers;
+mod dotnet_cmd;
+mod dotnet_format_report;
+mod dotnet_trx;
 mod env_cmd;
 mod filter;
 mod find_cmd;
@@ -55,10 +59,12 @@ mod runner;
 mod summary;
 mod tee;
 mod telemetry;
+mod toml_filter;
 mod tracking;
 mod tree;
 mod tsc_cmd;
 mod utils;
+mod verify_cmd;
 mod vitest_cmd;
 mod watch_cmd;
 mod wc_cmd;
@@ -352,8 +358,11 @@ enum Commands {
         #[arg(short, long, default_value = "minimal")]
         level: filter::FilterLevel,
         /// Max lines
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "tail_lines")]
         max_lines: Option<usize>,
+        /// Keep only last N lines
+        #[arg(long, conflicts_with = "max_lines")]
+        tail_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -482,6 +491,13 @@ enum Commands {
     },
 
     // ── Infrastructure ───────────────────────────────────────
+    /// .NET commands with compact output (build/test/restore/format)
+    #[command(display_order = 79)]
+    Dotnet {
+        #[command(subcommand)]
+        command: DotnetCommands,
+    },
+
     /// Docker commands with compact output
     #[command(display_order = 80)]
     Docker {
@@ -661,6 +677,10 @@ enum Commands {
         #[arg(short, long)]
         global: bool,
 
+        /// Install OpenCode plugin (in addition to Claude Code)
+        #[arg(long)]
+        opencode: bool,
+
         /// Show current configuration
         #[arg(long)]
         show: bool,
@@ -721,9 +741,16 @@ enum Commands {
     },
 
     // ── Internals ────────────────────────────────────────────
-    /// Verify hook integrity (SHA-256 check)
+    /// Verify hook integrity and run TOML filter inline tests
     #[command(display_order = 200)]
-    Verify,
+    Verify {
+        /// Run tests only for this filter name
+        #[arg(long)]
+        filter: Option<String>,
+        /// Fail if any filter has no inline tests (CI mode)
+        #[arg(long)]
+        require_all: bool,
+    },
 
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit", display_order = 201)]
@@ -737,7 +764,9 @@ enum Commands {
     #[command(display_order = 202)]
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
-        cmd: String,
+        /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Native Claude Code PreToolUse hook (reads JSON from stdin, no jq needed)
@@ -851,7 +880,7 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build (delegates to next build filter)
+    /// Build (generic passthrough, no framework-specific filter)
     Build {
         /// Additional build arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1034,6 +1063,33 @@ enum CargoCommands {
 }
 
 #[derive(Subcommand)]
+enum DotnetCommands {
+    /// Build with compact output
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with compact output
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restore with compact output
+    Restore {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Format with compact output
+    Format {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported dotnet subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
 enum GoCommands {
     /// Run tests with compact output (90% token reduction via JSON streaming)
     Test {
@@ -1153,6 +1209,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "proxy",
     "hook-audit",
     "cc-economics",
+    "verify",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
@@ -1175,28 +1232,94 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
     // Start timer before execution to capture actual command runtime
     let timer = tracking::TimedExecution::start();
 
-    let status = std::process::Command::new(&args[0])
-        .args(&args[1..])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
+    // TOML filter lookup — bypass with RTK_NO_TOML=1
+    // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
+    let lookup_cmd = {
+        let base = std::path::Path::new(&args[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| args[0].clone());
+        std::iter::once(base.as_str())
+            .chain(args[1..].iter().map(|s| s.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let toml_match = if std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1") {
+        None
+    } else {
+        toml_filter::find_matching_filter(&lookup_cmd)
+    };
 
-    match status {
-        Ok(s) => {
-            timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+    if let Some(filter) = toml_match {
+        // TOML match: capture stdout for filtering
+        let result = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped()) // capture
+            .stderr(std::process::Stdio::inherit()) // stderr always direct
+            .output();
 
-            tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+        match result {
+            Ok(output) => {
+                let stdout_raw = String::from_utf8_lossy(&output.stdout);
 
-            if !s.success() {
-                std::process::exit(s.code().unwrap_or(1));
+                // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
+                let tee_hint = if !output.status.success() {
+                    tee::tee_and_hint(&stdout_raw, &raw_command, output.status.code().unwrap_or(1))
+                } else {
+                    None
+                };
+
+                let filtered = toml_filter::apply_filter(filter, &stdout_raw);
+                println!("{}", filtered);
+                if let Some(hint) = tee_hint {
+                    println!("{}", hint);
+                }
+
+                timer.track(
+                    &raw_command,
+                    &format!("rtk:toml {}", raw_command),
+                    &stdout_raw,
+                    &filtered,
+                );
+                tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+                if !output.status.success() {
+                    std::process::exit(output.status.code().unwrap_or(1));
+                }
+            }
+            Err(e) => {
+                // Command not found — same behaviour as no-TOML path
+                tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                eprintln!("[rtk: {}]", e);
+                std::process::exit(127);
             }
         }
-        Err(e) => {
-            tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-            // Command not found or other OS error — show Clap's original error
-            eprintln!("[rtk: fallback failed: {}]", e);
-            parse_error.exit();
+    } else {
+        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
+        let status = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        match status {
+            Ok(s) => {
+                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+
+                tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+                if !s.success() {
+                    std::process::exit(s.code().unwrap_or(1));
+                }
+            }
+            Err(e) => {
+                tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                // Command not found or other OS error — single message, no duplicate Clap error
+                eprintln!("[rtk: {}]", e);
+                std::process::exit(127);
+            }
         }
     }
 
@@ -1240,12 +1363,36 @@ enum GtCommands {
     Other(Vec<OsString>),
 }
 
+/// Split a string into shell-like tokens, respecting single and double quotes.
+/// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
+fn shell_split(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn main() -> Result<()> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     telemetry::maybe_ping();
-
-    // Warn if installed hook is outdated (1/day, non-blocking)
-    hook_check::maybe_warn();
 
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -1256,6 +1403,12 @@ fn main() -> Result<()> {
             return run_fallback(e);
         }
     };
+
+    // Warn if installed hook is outdated/missing (1/day, non-blocking).
+    // Skip for Gain — it shows its own inline hook warning.
+    if !matches!(cli.command, Commands::Gain { .. }) {
+        hook_check::maybe_warn();
+    }
 
     // Runtime integrity check for operational commands.
     // Meta commands (init, gain, verify, config, etc.) skip the check
@@ -1277,15 +1430,23 @@ fn main() -> Result<()> {
             file,
             level,
             max_lines,
+            tail_lines,
             line_numbers,
             diet,
         } => {
             if file == Path::new("-") {
-                read::run_stdin(level, max_lines, line_numbers, cli.verbose)?;
+                read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)?;
             } else if diet {
                 read::run_diet(&file, cli.verbose)?;
             } else {
-                read::run(&file, level, max_lines, line_numbers, cli.verbose)?;
+                read::run(
+                    &file,
+                    level,
+                    max_lines,
+                    tail_lines,
+                    line_numbers,
+                    cli.verbose,
+                )?;
             }
         }
 
@@ -1469,7 +1630,10 @@ fn main() -> Result<()> {
                 )?;
             }
             PnpmCommands::Build { args } => {
-                next_cmd::run(&args, cli.verbose)?;
+                let mut build_args: Vec<String> = vec!["build".into()];
+                build_args.extend(args);
+                let os_args: Vec<OsString> = build_args.into_iter().map(OsString::from).collect();
+                pnpm_cmd::run_passthrough(&os_args, cli.verbose)?;
             }
             PnpmCommands::Typecheck { args } => {
                 tsc_cmd::run(&args, cli.verbose)?;
@@ -1524,6 +1688,24 @@ fn main() -> Result<()> {
                 log_cmd::run_stdin(cli.verbose)?;
             }
         }
+
+        Commands::Dotnet { command } => match command {
+            DotnetCommands::Build { args } => {
+                dotnet_cmd::run_build(&args, cli.verbose)?;
+            }
+            DotnetCommands::Test { args } => {
+                dotnet_cmd::run_test(&args, cli.verbose)?;
+            }
+            DotnetCommands::Restore { args } => {
+                dotnet_cmd::run_restore(&args, cli.verbose)?;
+            }
+            DotnetCommands::Format { args } => {
+                dotnet_cmd::run_format(&args, cli.verbose)?;
+            }
+            DotnetCommands::Other(args) => {
+                dotnet_cmd::run_passthrough(&args, cli.verbose)?;
+            }
+        },
 
         Commands::Docker { command } => match command {
             DockerCommands::Ps => {
@@ -1664,6 +1846,7 @@ fn main() -> Result<()> {
 
         Commands::Init {
             global,
+            opencode,
             show,
             claude_md,
             hook_only,
@@ -1676,6 +1859,9 @@ fn main() -> Result<()> {
             } else if uninstall {
                 init::uninstall(global, cli.verbose)?;
             } else {
+                let install_opencode = opencode;
+                let install_claude = !opencode;
+
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
                 } else if no_patch {
@@ -1683,7 +1869,15 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                init::run(
+                    global,
+                    install_claude,
+                    install_opencode,
+                    claude_md,
+                    hook_only,
+                    patch_mode,
+                    cli.verbose,
+                )?;
             }
         }
 
@@ -2097,7 +2291,8 @@ fn main() -> Result<()> {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
 
-        Commands::Rewrite { cmd } => {
+        Commands::Rewrite { args } => {
+            let cmd = args.join(" ");
             rewrite_cmd::run(&cmd)?;
         }
 
@@ -2117,11 +2312,26 @@ fn main() -> Result<()> {
 
             let timer = tracking::TimedExecution::start();
 
-            let cmd_name = args[0].to_string_lossy();
-            let cmd_args: Vec<String> = args[1..]
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect();
+            // If a single quoted arg contains spaces, split it respecting quotes (#388).
+            // e.g. rtk proxy 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
+            // e.g. rtk proxy 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
+            let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
+                let full = args[0].to_string_lossy();
+                let parts = shell_split(&full);
+                if parts.len() > 1 {
+                    (parts[0].clone(), parts[1..].to_vec())
+                } else {
+                    (full.into_owned(), vec![])
+                }
+            } else {
+                (
+                    args[0].to_string_lossy().into_owned(),
+                    args[1..]
+                        .iter()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .collect(),
+                )
+            };
 
             if cli.verbose > 0 {
                 eprintln!(
@@ -2134,7 +2344,7 @@ fn main() -> Result<()> {
 
             if filter {
                 // Filtered mode: capture all output, apply auto_filter, then print
-                let child_output = Command::new(cmd_name.as_ref())
+                let child_output = Command::new(cmd_name.as_str())
                     .args(&cmd_args)
                     .output()
                     .context(format!("Failed to execute command: {}", cmd_name))?;
@@ -2186,7 +2396,7 @@ fn main() -> Result<()> {
                 }
             } else {
                 // Raw mode: stream output in real-time, track but don't filter
-                let mut child = Command::new(cmd_name.as_ref())
+                let mut child = Command::new(cmd_name.as_str())
                     .args(&cmd_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -2267,8 +2477,18 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Verify => {
-            integrity::run_verify(cli.verbose)?;
+        Commands::Verify {
+            filter,
+            require_all,
+        } => {
+            if filter.is_some() {
+                // Filter-specific mode: run only that filter's tests
+                verify_cmd::run(filter, require_all)?;
+            } else {
+                // Default or --require-all: always run integrity check first
+                integrity::run_verify(cli.verbose)?;
+                verify_cmd::run(None, require_all)?;
+            }
         }
     }
 
@@ -2303,6 +2523,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Find { .. }
             | Commands::Diff { .. }
             | Commands::Log { .. }
+            | Commands::Dotnet { .. }
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
@@ -2641,6 +2862,88 @@ mod tests {
                 "Meta-command {:?} should parse successfully",
                 args
             );
+        }
+    }
+
+    #[test]
+    fn test_shell_split_simple() {
+        assert_eq!(
+            shell_split("head -50 file.php"),
+            vec!["head", "-50", "file.php"]
+        );
+    }
+
+    #[test]
+    fn test_shell_split_double_quotes() {
+        assert_eq!(
+            shell_split(r#"git log --format="%H %s""#),
+            vec!["git", "log", "--format=%H %s"]
+        );
+    }
+
+    #[test]
+    fn test_shell_split_single_quotes() {
+        assert_eq!(
+            shell_split("grep -r 'hello world' ."),
+            vec!["grep", "-r", "hello world", "."]
+        );
+    }
+
+    #[test]
+    fn test_shell_split_single_word() {
+        assert_eq!(shell_split("ls"), vec!["ls"]);
+    }
+
+    #[test]
+    fn test_shell_split_empty() {
+        let result: Vec<String> = shell_split("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_rewrite_clap_multi_args() {
+        // This is the bug KuSh reported: `rtk rewrite ls -al` failed because
+        // Clap rejected `-al` as an unknown flag. With trailing_var_arg + allow_hyphen_values,
+        // multiple args are accepted and joined into a single command string.
+        let cases = vec![
+            vec!["rtk", "rewrite", "ls", "-al"],
+            vec!["rtk", "rewrite", "git", "status"],
+            vec!["rtk", "rewrite", "npm", "exec"],
+            vec!["rtk", "rewrite", "cargo", "test"],
+            vec!["rtk", "rewrite", "du", "-sh", "."],
+            vec!["rtk", "rewrite", "head", "-50", "file.txt"],
+        ];
+        for args in &cases {
+            let result = Cli::try_parse_from(args.iter());
+            assert!(
+                result.is_ok(),
+                "rtk rewrite {:?} should parse (was failing before trailing_var_arg fix)",
+                &args[2..]
+            );
+            if let Ok(cli) = result {
+                match cli.command {
+                    Commands::Rewrite { ref args } => {
+                        assert!(args.len() >= 2, "rewrite args should capture all tokens");
+                    }
+                    _ => panic!("expected Rewrite command"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_rewrite_clap_quoted_single_arg() {
+        // Quoted form: `rtk rewrite "git status"` — single arg containing spaces
+        let result = Cli::try_parse_from(["rtk", "rewrite", "git status"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Rewrite { ref args } => {
+                    assert_eq!(args.len(), 1);
+                    assert_eq!(args[0], "git status");
+                }
+                _ => panic!("expected Rewrite command"),
+            }
         }
     }
 }

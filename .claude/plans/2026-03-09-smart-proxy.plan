@@ -1,0 +1,776 @@
+# Smart Proxy Enhancement Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Improve RTK's passthrough/proxy savings from ~40% to ~65% via smarter auto-filtering, add automatic output caching with diff for repeated commands, and add session repeat alerting.
+
+**Architecture:** Three features building on existing infrastructure. (1) Enhance `auto_filter.rs` pipeline with build-output-aware noise stripping. (2) New `cache.rs` module using file-based storage with configurable TTL, wired into the proxy execution path. (3) Repeat detection using tracking DB timestamps, emitting stderr hints. Each feature is independent and can be tested in isolation.
+
+**Tech Stack:** Rust, existing auto_filter/dedup/watch_cmd infrastructure, file-based cache, SQLite tracking DB.
+
+---
+
+### Task 1: Enhance Auto-Filter — Add Build Output Noise Patterns
+
+**Files:**
+- Modify: `src/dedup.rs` (add new noise patterns to `NOISE_PATTERNS`)
+
+**What to change:**
+
+Add these patterns to the existing `NOISE_PATTERNS` lazy_static vec in `dedup.rs`:
+
+```rust
+// Progress bars and spinners
+Regex::new(r"^\s*[\[({]?[#=\->.·⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]+[\])}]?\s*\d+%").unwrap(),
+Regex::new(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✗●○◉◎]").unwrap(),
+
+// Vite/Webpack/Turbo build lines
+Regex::new(r"^\s*\u{25cf}\s+").unwrap(),                         // "● Building..."
+Regex::new(r"^\s*✓\s+\d+\s+modules?\s+transformed").unwrap(),    // Vite "✓ 42 modules transformed"
+Regex::new(r"^\s*\[vite\]\s+optimized\s+deps").unwrap(),          // Vite dep optimization
+Regex::new(r"^\s*hmr\s+update\s+").unwrap(),                      // Vite HMR
+
+// Turbo/pnpm workspace
+Regex::new(r"^\s*\u{25b6}\s+\S+:\S+\s*$").unwrap(),              // "▶ @app/web:build"
+Regex::new(r"^\s*cache\s+(hit|miss|bypass)").unwrap(),             // Turbo cache status
+
+// Generic build noise
+Regex::new(r"^\s*Bundling").unwrap(),
+Regex::new(r"^\s*Transforming").unwrap(),
+Regex::new(r"^\s*Processing\s+").unwrap(),
+Regex::new(r"^\s*Generating\s+").unwrap(),
+```
+
+**Steps:**
+1. Read `src/dedup.rs`
+2. Add the new patterns to `NOISE_PATTERNS`
+3. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+4. Do NOT commit yet
+
+---
+
+### Task 2: Enhance Auto-Filter — Strip Blank Lines, Decorative Separators, CR Lines
+
+**Files:**
+- Modify: `src/auto_filter.rs` (add pipeline stages before dedup)
+
+**What to change in `filter_with_status()`:**
+
+After ANSI strip (step 1), before noise dedup (step 2), add:
+
+```rust
+// 1.5. Strip carriage-return overwritten lines (keep last version only)
+let clean = strip_cr_overwrites(&clean);
+
+// 1.6. Strip decorative separators and excessive blank lines
+let clean = strip_decorative(&clean);
+```
+
+**Add helper functions** in `auto_filter.rs`:
+
+```rust
+/// Strip lines overwritten by carriage return (progress bars, spinners).
+/// Only keeps the final version of each line group.
+fn strip_cr_overwrites(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| {
+            // If line contains \r, only keep content after last \r
+            if let Some(pos) = line.rfind('\r') {
+                &line[pos + 1..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Strip decorative separators (═══, ───, ***, etc.) and collapse
+/// runs of 3+ blank lines into a single blank line.
+fn strip_decorative(output: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref DECORATOR: regex::Regex =
+            regex::Regex::new(r"^[\s=─━\-\*~_╌╍┄┅┈┉]{4,}\s*$").unwrap();
+    }
+    let mut result = Vec::new();
+    let mut blank_count = 0u32;
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                result.push(line);
+            }
+        } else if DECORATOR.is_match(line) {
+            // Skip decorative lines entirely
+        } else {
+            blank_count = 0;
+            result.push(line);
+        }
+    }
+
+    result.join("\n")
+}
+```
+
+**Steps:**
+1. Read `src/auto_filter.rs`
+2. Add the two helper functions
+3. Wire them into `filter_with_status()` pipeline
+4. Add `use lazy_static::lazy_static;` and `use regex;` if not present
+5. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+6. Do NOT commit yet
+
+---
+
+### Task 3: Add Auto-Filter Tests
+
+**Files:**
+- Modify: `src/auto_filter.rs` (add tests to existing `#[cfg(test)] mod tests`)
+
+**Add these tests:**
+
+```rust
+#[test]
+fn test_strip_cr_overwrites() {
+    let input = "Building...\rBuilding... 50%\rBuilding... 100%\rDone!";
+    let result = strip_cr_overwrites(input);
+    assert_eq!(result, "Done!");
+}
+
+#[test]
+fn test_strip_decorative_separators() {
+    let input = "Header\n════════════════\nContent\n────────────────\nFooter";
+    let result = strip_decorative(input);
+    assert_eq!(result, "Header\nContent\nFooter");
+}
+
+#[test]
+fn test_strip_decorative_preserves_dashes_in_content() {
+    let input = "file-name.rs\n--flag value";
+    let result = strip_decorative(input);
+    assert!(result.contains("file-name.rs"));
+    assert!(result.contains("--flag value"));
+}
+
+#[test]
+fn test_collapse_blank_lines() {
+    let input = "line1\n\n\n\n\nline2\n\nline3";
+    let result = strip_decorative(input);
+    // 5 blanks → 2 max
+    let blank_count = result.lines().filter(|l| l.trim().is_empty()).count();
+    assert!(blank_count <= 2);
+    assert!(result.contains("line1"));
+    assert!(result.contains("line2"));
+}
+
+#[test]
+fn test_filter_build_output_savings() {
+    // Simulated build output with noise
+    let mut input = String::new();
+    for i in 1..=20 {
+        input.push_str(&format!("   Compiling pkg{} v1.0.0\n", i));
+    }
+    input.push_str("\n════════════════════════════════\n");
+    input.push_str("✓ 42 modules transformed\n");
+    input.push_str("✓ 38 modules transformed\n");
+    input.push_str("✓ 15 modules transformed\n");
+    input.push_str("\n\n\n\n\n");
+    input.push_str("Build complete in 2.3s\n");
+    input.push_str("  bundle size: 145 kB\n");
+
+    let (output, _) = filter(&input);
+
+    let input_tokens = input.split_whitespace().count();
+    let output_tokens = output.split_whitespace().count();
+    let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+    assert!(
+        savings >= 50.0,
+        "Expected ≥50% savings on build output, got {:.1}%\nOutput:\n{}",
+        savings,
+        output
+    );
+}
+```
+
+**Steps:**
+1. Add the tests
+2. Run `cargo test auto_filter` — all should pass
+3. Run full quality gate: `cargo fmt --all && cargo clippy --all-targets && cargo test`
+4. Do NOT commit yet
+
+---
+
+### Task 4: Commit Auto-Filter Enhancement
+
+**Steps:**
+1. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+2. Verify 0 warnings, all tests pass
+3. Commit:
+
+```bash
+git add src/auto_filter.rs src/dedup.rs
+git commit -m "feat(auto-filter): add build output noise patterns and decorative stripping
+
+Add progress bar, Vite/Webpack/Turbo, and generic build noise patterns.
+Strip carriage-return overwritten lines and decorative separators.
+Collapse excessive blank lines. Target: 60-70% savings on build output."
+```
+
+---
+
+### Task 5: Add Cache Module — Core Infrastructure
+
+**Files:**
+- Create: `src/cache.rs`
+
+**What to create:**
+
+```rust
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+
+/// Default cache TTL in minutes
+const DEFAULT_TTL_MINUTES: u64 = 5;
+
+/// Cache directory for output storage
+fn cache_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("rtk").join("cache"))
+}
+
+/// Generate a stable key from command + working directory
+fn cache_key(cmd: &str, cwd: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    cmd.hash(&mut hasher);
+    cwd.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Commands that change too frequently to benefit from caching.
+const SKIP_CACHE_PREFIXES: &[&str] = &[
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git stash",
+    "ls",
+    "find",
+    "grep",
+    "cat",
+    "head",
+    "tail",
+    "ps",
+    "top",
+    "env",
+    "date",
+    "time",
+];
+
+/// Check if a command should be cached
+fn should_cache(cmd: &str) -> bool {
+    let lower = cmd.to_lowercase();
+    !SKIP_CACHE_PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
+/// Load cached output if it exists and is within TTL.
+/// Returns Some((cached_output, age_secs)) or None.
+pub fn load(cmd: &str, cwd: &str, ttl_minutes: u64) -> Option<(String, u64)> {
+    if !should_cache(cmd) {
+        return None;
+    }
+
+    let dir = cache_dir()?;
+    let key = cache_key(cmd, cwd);
+    let path = dir.join(&key);
+
+    if !path.exists() {
+        return None;
+    }
+
+    // Check age
+    let metadata = std::fs::metadata(&path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    let ttl = Duration::from_secs(ttl_minutes * 60);
+
+    if age > ttl {
+        // Expired — remove stale cache
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    Some((content, age.as_secs()))
+}
+
+/// Store output in cache.
+pub fn store(cmd: &str, cwd: &str, output: &str) {
+    if !should_cache(cmd) {
+        return;
+    }
+
+    if let Some(dir) = cache_dir() {
+        let key = cache_key(cmd, cwd);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(&key), output);
+    }
+}
+
+/// Compute diff between cached and current output.
+/// Returns a compact summary of changes.
+pub fn diff_output(cached: &str, current: &str) -> String {
+    if cached == current {
+        return "(no changes)".to_string();
+    }
+
+    let prev_lines: Vec<&str> = cached.lines().collect();
+    let curr_lines: Vec<&str> = current.lines().collect();
+
+    let prev_set: std::collections::HashSet<&str> = prev_lines.iter().copied().collect();
+    let curr_set: std::collections::HashSet<&str> = curr_lines.iter().copied().collect();
+
+    let removed: Vec<&&str> = prev_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty() && !curr_set.contains(**l))
+        .collect();
+
+    let added: Vec<&&str> = curr_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty() && !prev_set.contains(**l))
+        .collect();
+
+    if removed.is_empty() && added.is_empty() {
+        return "(no meaningful changes)".to_string();
+    }
+
+    let mut result = Vec::new();
+
+    if !removed.is_empty() {
+        result.push(format!("--- Resolved ({}) ---", removed.len()));
+        for line in removed.iter().take(20) {
+            result.push(format!("  {}", line));
+        }
+        if removed.len() > 20 {
+            result.push(format!("  ... ({} more)", removed.len() - 20));
+        }
+    }
+
+    if !added.is_empty() {
+        result.push(format!("--- New ({}) ---", added.len()));
+        for line in added.iter().take(30) {
+            result.push(format!("  {}", line));
+        }
+        if added.len() > 30 {
+            result.push(format!("  ... ({} more)", added.len() - 30));
+        }
+    }
+
+    result.join("\n")
+}
+
+/// Read cache TTL from config or env var.
+/// Priority: RTK_CACHE_TTL env > config.toml [cache] ttl_minutes > default (5)
+pub fn get_ttl_minutes() -> u64 {
+    if let Ok(val) = std::env::var("RTK_CACHE_TTL") {
+        if let Ok(mins) = val.parse::<u64>() {
+            return mins;
+        }
+    }
+    // Config file check would go here when CacheConfig is added
+    DEFAULT_TTL_MINUTES
+}
+
+/// Clear all cache entries
+pub fn clear() -> std::io::Result<()> {
+    if let Some(dir) = cache_dir() {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_key_deterministic() {
+        let a = cache_key("cargo test", "/projects/rtk");
+        let b = cache_key("cargo test", "/projects/rtk");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_cache_key_varies_by_cwd() {
+        let a = cache_key("cargo test", "/projects/rtk");
+        let b = cache_key("cargo test", "/projects/other");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_should_cache_build() {
+        assert!(should_cache("cargo build"));
+        assert!(should_cache("pnpm build"));
+        assert!(should_cache("npm run build"));
+        assert!(should_cache("cargo test"));
+        assert!(should_cache("go test ./..."));
+    }
+
+    #[test]
+    fn test_should_not_cache_volatile() {
+        assert!(!should_cache("git status"));
+        assert!(!should_cache("git diff"));
+        assert!(!should_cache("git log --oneline"));
+        assert!(!should_cache("ls -la"));
+        assert!(!should_cache("find . -name '*.rs'"));
+    }
+
+    #[test]
+    fn test_diff_identical() {
+        let diff = diff_output("hello\nworld", "hello\nworld");
+        assert!(diff.contains("no changes"));
+    }
+
+    #[test]
+    fn test_diff_added() {
+        let diff = diff_output("test_a ok", "test_a ok\ntest_b ok");
+        assert!(diff.contains("New (1)"));
+        assert!(diff.contains("test_b"));
+    }
+
+    #[test]
+    fn test_diff_removed() {
+        let diff = diff_output("test_a FAIL\ntest_b ok", "test_b ok");
+        assert!(diff.contains("Resolved (1)"));
+        assert!(diff.contains("FAIL"));
+    }
+
+    #[test]
+    fn test_get_ttl_default() {
+        // Without env var set, should return default
+        let ttl = DEFAULT_TTL_MINUTES;
+        assert_eq!(ttl, 5);
+    }
+}
+```
+
+**Steps:**
+1. Create `src/cache.rs`
+2. Add `mod cache;` to `src/main.rs` (after other mod declarations)
+3. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+4. Do NOT commit yet
+
+---
+
+### Task 6: Add CacheConfig to Config System
+
+**Files:**
+- Modify: `src/config.rs` (add CacheConfig struct and field)
+- Modify: `src/cache.rs` (read from config)
+
+**What to change in `config.rs`:**
+
+Add after `HooksConfig`:
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub ttl_minutes: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_minutes: 5,
+        }
+    }
+}
+```
+
+Add field to `Config` struct:
+
+```rust
+#[serde(default)]
+pub cache: CacheConfig,
+```
+
+**What to change in `cache.rs`:**
+
+Update `get_ttl_minutes()`:
+
+```rust
+pub fn get_ttl_minutes() -> u64 {
+    if let Ok(val) = std::env::var("RTK_CACHE_TTL") {
+        if let Ok(mins) = val.parse::<u64>() {
+            return mins;
+        }
+    }
+    if let Ok(config) = crate::config::Config::load() {
+        return config.cache.ttl_minutes;
+    }
+    DEFAULT_TTL_MINUTES
+}
+
+pub fn is_enabled() -> bool {
+    if let Ok(val) = std::env::var("RTK_CACHE") {
+        return val != "0" && val.to_lowercase() != "false";
+    }
+    if let Ok(config) = crate::config::Config::load() {
+        return config.cache.enabled;
+    }
+    true
+}
+```
+
+**Steps:**
+1. Apply changes to both files
+2. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+3. Do NOT commit yet
+
+---
+
+### Task 7: Wire Cache into Proxy Execution Path
+
+**Files:**
+- Modify: `src/main.rs` (in the `Commands::Proxy { filter, args }` branch)
+
+**What to change:**
+
+In the proxy filtered mode section (around line 1947), after capturing the output and before printing, add cache logic:
+
+```rust
+if filter {
+    // Filtered mode: capture all output, apply auto_filter, then print
+    let child_output = Command::new(cmd_name.as_ref())
+        .args(&cmd_args)
+        .output()
+        .context(format!("Failed to execute command: {}", cmd_name))?;
+
+    let stdout = String::from_utf8_lossy(&child_output.stdout);
+    let stderr = String::from_utf8_lossy(&child_output.stderr);
+    let full_output = format!("{}{}", stdout, stderr);
+    let success = child_output.status.success();
+
+    let (filtered, _) = auto_filter::filter_with_status(&full_output, success);
+
+    // Auto-cache: check for recent cached output and diff
+    let cmd_str = format!("{} {}", cmd_name, cmd_args.join(" "));
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let final_output = if cache::is_enabled() {
+        let ttl = cache::get_ttl_minutes();
+        if let Some((cached, age_secs)) = cache::load(&cmd_str, &cwd, ttl) {
+            let diff = cache::diff_output(&cached, &filtered);
+            cache::store(&cmd_str, &cwd, &filtered);
+            if diff.contains("no changes") {
+                format!("[no changes since {}s ago]", age_secs)
+            } else {
+                format!("[changes since {}s ago]\n{}", age_secs, diff)
+            }
+        } else {
+            cache::store(&cmd_str, &cwd, &filtered);
+            filtered.clone()
+        }
+    } else {
+        filtered.clone()
+    };
+
+    print!("{}", final_output);
+
+    timer.track(
+        &format!("{} {}", cmd_name, cmd_args.join(" ")),
+        &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
+        &full_output,
+        &final_output,
+    );
+
+    if !success {
+        std::process::exit(child_output.status.code().unwrap_or(1));
+    }
+}
+```
+
+**Steps:**
+1. Read the current proxy section in `src/main.rs`
+2. Apply the cache wiring changes
+3. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+4. Do NOT commit yet
+
+---
+
+### Task 8: Commit Cache Feature
+
+**Steps:**
+1. Run full quality gate: `cargo fmt --all && cargo clippy --all-targets && cargo test`
+2. Commit:
+
+```bash
+git add src/cache.rs src/config.rs src/main.rs
+git commit -m "feat(cache): auto-cache with diff for repeated proxy commands
+
+Add file-based output cache with configurable TTL (default 5 min).
+When a proxy command re-runs within TTL, show only what changed.
+Configurable via config.toml [cache] section or RTK_CACHE_TTL env var.
+Volatile commands (git status, ls, find) excluded from caching."
+```
+
+---
+
+### Task 9: Add Session Repeat Alerting
+
+**Files:**
+- Modify: `src/tracking.rs` (add `count_recent_runs()` query)
+- Modify: `src/main.rs` (add hint emission after tracking)
+
+**What to add in `tracking.rs`:**
+
+Add method to `Tracker` impl:
+
+```rust
+/// Count how many times a base_cmd has been run in the last N minutes.
+/// Used for repeat alerting — suggest `rtk watch` when commands repeat.
+pub fn count_recent_runs(&self, base_cmd: &str, minutes: u64) -> Result<usize> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(minutes as i64);
+    let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    let count: i64 = self.conn.query_row(
+        "SELECT COUNT(*) FROM commands WHERE base_cmd = ?1 AND timestamp > ?2",
+        rusqlite::params![base_cmd, cutoff_str],
+        |row| row.get(0),
+    )?;
+
+    Ok(count as usize)
+}
+```
+
+**What to add in `main.rs`:**
+
+Add a helper function:
+
+```rust
+/// Emit a hint to stderr if the same command has been repeated 3+ times recently.
+/// Only hints once per command per session (tracks via a static HashSet).
+fn maybe_hint_watch(base_cmd: &str) {
+    use std::sync::Mutex;
+    lazy_static::lazy_static! {
+        static ref HINTED: Mutex<std::collections::HashSet<String>> =
+            Mutex::new(std::collections::HashSet::new());
+    }
+
+    // Skip if quiet mode
+    if std::env::var("RTK_QUIET").map_or(false, |v| v == "1" || v.to_lowercase() == "true") {
+        return;
+    }
+
+    // Skip volatile commands
+    const SKIP_HINT: &[&str] = &[
+        "rtk git status", "rtk git diff", "rtk git log", "rtk git show",
+        "rtk ls", "rtk find", "rtk grep",
+    ];
+    if SKIP_HINT.iter().any(|p| base_cmd.starts_with(p)) {
+        return;
+    }
+
+    // Only hint once per base_cmd
+    {
+        let mut hinted = HINTED.lock().unwrap();
+        if hinted.contains(base_cmd) {
+            return;
+        }
+
+        if let Ok(tracker) = crate::tracking::Tracker::new() {
+            if let Ok(count) = tracker.count_recent_runs(base_cmd, 60) {
+                if count >= 3 {
+                    let short_cmd = base_cmd.strip_prefix("rtk ").unwrap_or(base_cmd);
+                    eprintln!(
+                        "[repeated {}x — consider: rtk watch {}]",
+                        count, short_cmd
+                    );
+                    hinted.insert(base_cmd.to_string());
+                }
+            }
+        }
+    }
+}
+```
+
+Wire `maybe_hint_watch()` calls after `timer.track()` in the main command dispatch sections. The best place is in the `TimedExecution::track()` method itself, or after each `.track()` call in main.rs. The simplest approach: add the call inside `TimedExecution::track()` in tracking.rs:
+
+In `tracking.rs`, modify `TimedExecution::track()`:
+
+```rust
+pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+    let elapsed_ms = self.start.elapsed().as_millis() as u64;
+    let input_tokens = estimate_tokens(input);
+    let output_tokens = estimate_tokens(output);
+
+    if let Ok(tracker) = Tracker::new() {
+        let _ = tracker.record(
+            original_cmd,
+            rtk_cmd,
+            input_tokens,
+            output_tokens,
+            elapsed_ms,
+        );
+    }
+}
+```
+
+Then call `maybe_hint_watch(rtk_cmd)` at call sites where it makes sense (proxy, runner, git). The simplest single-point wire: add it to `main.rs` right after the proxy `timer.track(...)` call and after the other major command blocks that use `timer.track()`.
+
+**Steps:**
+1. Add `count_recent_runs()` to `tracking.rs`
+2. Add `maybe_hint_watch()` to `main.rs`
+3. Call `maybe_hint_watch()` after tracking in proxy and runner command paths
+4. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+5. Commit:
+
+```bash
+git add src/tracking.rs src/main.rs
+git commit -m "feat: session repeat alerting — hint rtk watch on 3+ repeats
+
+When a command runs 3+ times within 60 minutes, emit a stderr hint
+suggesting rtk watch. One hint per command per session. Silenceable
+via RTK_QUIET=1. Skips volatile commands (git status, ls, etc.)."
+```
+
+---
+
+### Task 10: Build, Test, Verify All Changes
+
+**Steps:**
+1. Run full quality gate: `cargo fmt --all && cargo clippy --all-targets && cargo test`
+2. Install: `cargo install --path .`
+3. Verify auto-filter: `rtk proxy -f pnpm build` in a project with build output — should show improved savings
+4. Verify cache: run `rtk proxy -f cargo test` twice within 5 minutes — second run should show diff
+5. Verify repeat hint: run `rtk cargo test` 3+ times in a row — should see stderr hint on 3rd run
+6. Verify `RTK_CACHE=0 rtk proxy -f cargo test` — should show full output (cache disabled)
+7. Verify `RTK_QUIET=1 rtk cargo test` — should not show repeat hint
+
+---
+
+## Summary
+
+| Task | Description | Files |
+|------|-------------|-------|
+| 1 | Add build noise patterns to dedup | dedup.rs |
+| 2 | Add CR strip + decorative strip to auto-filter | auto_filter.rs |
+| 3 | Add auto-filter tests | auto_filter.rs |
+| 4 | Commit auto-filter enhancement | — |
+| 5 | Create cache module | cache.rs (new) |
+| 6 | Add CacheConfig to config system | config.rs, cache.rs |
+| 7 | Wire cache into proxy execution | main.rs |
+| 8 | Commit cache feature | — |
+| 9 | Add session repeat alerting | tracking.rs, main.rs |
+| 10 | Build, test, verify | — |
+
+Total: 10 tasks, 5 files modified/created.
