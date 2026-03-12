@@ -48,6 +48,10 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Bun/Deno
+    r"^bun\s+(install|add|remove|test|build|run|pm)",
+    r"^bunx\s+",
+    r"^deno\s+(test|lint|check|run|task|compile|install)",
     // TOML-filtered commands
     r"^ansible-playbook\b",
     r"^brew\s+(install|upgrade)\b",
@@ -349,6 +353,34 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 75.0,
         subcmd_savings: &[],
         subcmd_status: &[],
+    },
+    // Bun/Deno
+    RtkRule {
+        rtk_cmd: "rtk bun",
+        rewrite_prefixes: &["bun"],
+        category: "PackageManager",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("install", 80.0)],
+        subcmd_status: &[("run", RtkStatus::Passthrough)],
+    },
+    RtkRule {
+        rtk_cmd: "rtk bunx",
+        rewrite_prefixes: &["bunx"],
+        category: "PackageManager",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk deno",
+        rewrite_prefixes: &["deno"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("lint", 80.0)],
+        subcmd_status: &[
+            ("run", RtkStatus::Passthrough),
+            ("task", RtkStatus::Passthrough),
+        ],
     },
     // TOML-filtered commands
     RtkRule {
