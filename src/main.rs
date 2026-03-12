@@ -1368,11 +1368,10 @@ enum GtCommands {
 fn shell_split(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
 
-    while let Some(c) = chars.next() {
+    for c in input.chars() {
         match c {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,

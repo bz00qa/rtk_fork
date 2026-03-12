@@ -730,11 +730,8 @@ mod tests {
             "tail -f app.log > /dev/null",
         ];
         for cmd in &write_commands {
-            match classify_command(cmd) {
-                Classification::Supported { .. } => {
-                    panic!("{} should NOT be classified as Supported", cmd)
-                }
-                _ => {} // Unsupported or Ignored is fine
+            if let Classification::Supported { .. } = classify_command(cmd) {
+                panic!("{} should NOT be classified as Supported", cmd)
             }
         }
     }

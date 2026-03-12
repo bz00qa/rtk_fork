@@ -543,7 +543,7 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
         .into_iter()
         .filter(|name| {
             // When a specific filter is requested, only report that one as missing tests
-            filter_name_opt.map_or(true, |f| name == f)
+            filter_name_opt.is_none_or(|f| name == f)
         })
         .filter(|name| !tested_filter_names.contains(name))
         .collect();

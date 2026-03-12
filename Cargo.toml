@@ -31,10 +31,10 @@ sha2 = "0.10"
 ureq = "3"
 hostname = "0.4"
 flate2 = "1.0"
-quick-xml = "0.37"
+quick-xml = "0.39"
 
 [build-dependencies]
-toml = "0.8"
+toml = "1"
 
 [dev-dependencies]
 

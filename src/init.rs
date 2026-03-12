@@ -17,6 +17,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
+#[allow(dead_code)] // Used on Unix builds only
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
 # Docs: https://github.com/rtk-ai/rtk#custom-filters
@@ -33,6 +34,7 @@ schema_version = 1
 "#;
 
 /// Template for user-global filters (~/.config/rtk/filters.toml).
+#[allow(dead_code)] // Used on Unix builds only
 const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global RTK filters — apply to all your projects.
 # Project-local .rtk/filters.toml takes precedence over these.
 # Docs: https://github.com/rtk-ai/rtk#custom-filters
@@ -853,6 +855,7 @@ fn run_default_mode(
 }
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
+#[allow(dead_code)] // Used on Unix builds only
 fn generate_project_filters_template(verbose: u8) -> Result<()> {
     let rtk_dir = std::path::Path::new(".rtk");
     let path = rtk_dir.join("filters.toml");
@@ -877,6 +880,7 @@ fn generate_project_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Generate ~/.config/rtk/filters.toml template if not present.
+#[allow(dead_code)] // Used on Unix builds only
 fn generate_global_filters_template(verbose: u8) -> Result<()> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
     let rtk_dir = config_dir.join("rtk");
@@ -1463,7 +1467,6 @@ fn run_opencode_only_mode(verbose: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use tempfile::TempDir;
 
     #[test]

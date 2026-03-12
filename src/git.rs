@@ -366,7 +366,7 @@ fn run_log(
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
             || arg == "-n"
             || arg.starts_with("--max-count")
     });
@@ -442,7 +442,7 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
         // -20 (combined digit form)
         if arg.starts_with('-')
             && arg.len() > 1
-            && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+            && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
                 return Some(n);

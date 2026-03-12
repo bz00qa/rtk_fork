@@ -33,7 +33,7 @@ fn main() {
     }
 
     // Validate: parse the combined TOML to catch errors at build time
-    let parsed: toml::Value = combined.parse().unwrap_or_else(|e| {
+    let parsed: toml::Table = toml::from_str(&combined).unwrap_or_else(|e| {
         panic!(
             "TOML validation failed for combined filters:\n{}\n\nCheck src/filters/*.toml files",
             e
@@ -41,7 +41,7 @@ fn main() {
     });
 
     // Detect duplicate filter names across files
-    if let Some(filters) = parsed.get("filters").and_then(|f| f.as_table()) {
+    if let Some(toml::Value::Table(filters)) = parsed.get("filters") {
         let mut seen: HashSet<String> = HashSet::new();
         for key in filters.keys() {
             if !seen.insert(key.clone()) {
