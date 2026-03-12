@@ -5,6 +5,40 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0-mod5] Upstream Merge v0.29.0 (2026-03-12)
+
+### Upstream Features (v0.28.0–v0.29.0)
+* **TOML Filter DSL**: Declarative filter engine — define filters in TOML without writing Rust code
+  - 50+ built-in filters (ansible-playbook, rsync, dotnet, swift, shellcheck, hadolint, poetry, composer, brew, df, ps, systemctl, yamllint, markdownlint, uv, ping, and more)
+  - User-global config support with shadow warning for project overrides
+  - `rtk init` templates for project and global filter files
+  - Build-time TOML compilation via `build.rs` (concatenates `src/filters/*.toml`)
+* **Rewrite engine** (v0.29.0): Centralized command routing via `rtk rewrite`
+  - Hook system improvements for consistent command delegation
+  - Single source of truth for all hook rewrites
+* **.NET/C# support**: `rtk dotnet build/test/format` with MSBuild binlog parsing, TRX test results, format reports
+* **OpenCode plugin**: `rtk init --opencode` installs OpenCode hook alongside Claude Code
+* **`rtk read --tail-lines`**: Read last N lines of a file (conflicts_with `--max-lines`)
+* **`rtk verify`**: Verify TOML filter definitions with `--filter` and `--require-all` options
+* **Telemetry**: Anonymous 1/day opt-out ping with enriched payload (install method, tokens saved)
+* **RTK_DISABLED bypass detection**: `rtk discover` now warns about commands prefixed with `RTK_DISABLED=1`
+
+### Merge Integration
+* Resolved 13 conflicting files preserving all fork-specific features
+* All fork features preserved: proxy-f auto-filter, Windows init, bun/deno, cache, discover optimizations, context/dedup/watch commands, diet mode, verbose flag stripping
+* Fixed Windows CRLF compatibility in binlog parser
+
+### Dependency Updates
+* `toml` build-dep 0.8 → 1.0 (fixed `build.rs` to use `toml::from_str`)
+* `quick-xml` 0.37 → 0.39
+* New upstream deps: `flate2`, `sha2`, `ureq 3`, `hostname`
+
+### Code Quality
+* Resolved all clippy warnings (0 warnings)
+* Fixed: `map_or` → `is_some_and`/`is_none_or`, `while let` → `for` loop, `match` → `if let`
+* Added `#[allow(dead_code)]` for Unix-only items on Windows builds
+* **1018 tests**: up from 830 in previous fork version
+
 ## [0.27.2-mod5] Fork Enhancements (2026-03-10)
 
 ### Command Parsing Overhaul

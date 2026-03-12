@@ -51,7 +51,8 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 | `pytest` | 4x | 8,000 | 800 | -90% |
 | `go test` | 3x | 6,000 | 600 | -90% |
 | `docker ps` | 3x | 900 | 180 | -80% |
-| **Total** | | **~118,000** | **~23,900** | **-80%** |
+| `dotnet build/test` | 3x | 6,000 | 600 | -90% |
+| **Total** | | **~124,000** | **~24,500** | **-80%** |
 
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
 
@@ -97,7 +98,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.27.2" (or newer)
+rtk --version   # Should show "rtk 0.29.0" (or newer)
 rtk gain        # Should show token savings stats
 ```
 
@@ -205,6 +206,13 @@ rtk deno task <name>            # Run deno tasks
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk prisma generate             # Schema generation (no ASCII art)
+```
+
+### .NET / C#
+```bash
+rtk dotnet build                # Build errors only
+rtk dotnet test                 # Test results (TRX parsing)
+rtk dotnet format               # Format report
 ```
 
 ### Containers
@@ -331,6 +339,7 @@ After install, **restart Claude Code**.
 | `bun install/test/build/run/pm` | `rtk bun ...` |
 | `bunx <tool>` | `rtk bunx ...` |
 | `deno test/lint/check/run/task` | `rtk deno ...` |
+| `dotnet build/test/format` | `rtk dotnet ...` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and ignored commands (`cd`, `echo`, env assignments) pass through unchanged. Unrecognized commands are auto-routed through `rtk proxy --filter` for generic noise reduction (ANSI stripping, dedup, truncation).
@@ -362,6 +371,29 @@ When the same command runs 3+ times within 10 minutes, RTK suggests using `rtk w
 
 ### Verbose Flag Stripping
 The hook automatically strips verbose flags (`-v`, `-vv`, `--verbose`, `--debug`) from commands before execution to prevent token-heavy output. Commands where `-v` has different semantics (e.g., `grep -v` = invert match) are excluded.
+
+## TOML Filter DSL
+
+Define custom filters in TOML without writing Rust code. RTK ships with 50+ built-in filters and supports user-defined ones.
+
+```toml
+# ~/.config/rtk/filters.toml
+schema_version = 1
+
+[filters.my-tool]
+description = "Compact my-tool output"
+match_command = "^my-tool\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^ok:"]
+max_lines = 60
+```
+
+```bash
+rtk verify                      # Validate all filter definitions
+rtk verify --filter my-tool     # Validate specific filter
+```
+
+See [docs/filter-workflow.md](docs/filter-workflow.md) for the full DSL reference.
 
 ## Configuration
 
