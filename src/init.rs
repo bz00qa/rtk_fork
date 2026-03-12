@@ -7,6 +7,7 @@ use tempfile::NamedTempFile;
 use crate::integrity;
 
 // Embedded hook script (guards before set -euo pipefail)
+#[cfg(any(unix, test))]
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 
 // Embedded OpenCode plugin (auto-rewrite)
@@ -16,6 +17,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
+#[allow(dead_code)] // Used on Unix builds only
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
 # Docs: https://github.com/rtk-ai/rtk#custom-filters
@@ -32,6 +34,7 @@ schema_version = 1
 "#;
 
 /// Template for user-global filters (~/.config/rtk/filters.toml).
+#[allow(dead_code)] // Used on Unix builds only
 const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global RTK filters — apply to all your projects.
 # Project-local .rtk/filters.toml takes precedence over these.
 # Docs: https://github.com/rtk-ai/rtk#custom-filters
@@ -226,6 +229,7 @@ pub fn run(
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
+#[cfg(unix)]
 fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     let claude_dir = resolve_claude_dir()?;
     let hook_dir = claude_dir.join("hooks");
@@ -507,7 +511,7 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
             fs::write(&claude_md_path, cleaned).with_context(|| {
                 format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
             })?;
-            removed.push(format!("CLAUDE.md: removed @RTK.md reference"));
+            removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
         }
     }
 
@@ -566,7 +570,7 @@ fn patch_settings_json(
     };
 
     // Check idempotency
-    if hook_already_present(&root, &hook_command) {
+    if hook_already_present(&root, hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -591,7 +595,7 @@ fn patch_settings_json(
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, &hook_command);
+    insert_hook_entry(&mut root, hook_command);
 
     // Backup original
     if settings_path.exists() {
@@ -711,24 +715,61 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            // Exact match OR both contain rtk-rewrite.sh
+            // Exact match OR both contain rtk-rewrite.sh OR native hook-rewrite
             cmd == hook_command
                 || (cmd.contains("rtk-rewrite.sh") && hook_command.contains("rtk-rewrite.sh"))
+                || cmd.contains("rtk hook-rewrite")
         })
 }
 
-/// Default mode: hook + slim RTK.md + @RTK.md reference
+/// Default mode: native hook + CLAUDE.md injection
 #[cfg(not(unix))]
 fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
     _install_opencode: bool,
 ) -> Result<()> {
-    eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
+    if !global {
+        // Local init: full injection into ./CLAUDE.md (no hook)
+        return run_claude_md_mode(false, verbose, _install_opencode);
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+
+    // 1. Write slim RTK.md (30 lines vs 133-line full block)
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 2. Patch CLAUDE.md (add @RTK.md, migrate old block if present)
+    let migrated = patch_claude_md(&claude_md_path, verbose)?;
+
+    // 3. Patch settings.json with native hook
+    let hook_command = "rtk hook-rewrite";
+    let dummy_path = std::path::PathBuf::from(hook_command);
+    let patch_result = patch_settings_json(&dummy_path, patch_mode, verbose, false)?;
+
+    // 4. Print summary
+    println!("\nRTK init complete (global).\n");
+    println!("  RTK.md:    {} (slim, 30 lines)", rtk_md_path.display());
+    println!("  CLAUDE.md: @RTK.md reference added");
+
+    if migrated {
+        println!("\n  Migrated: removed 133-line RTK block from CLAUDE.md");
+        println!("            replaced with @RTK.md (30 lines)");
+    }
+
+    match patch_result {
+        PatchResult::Patched => {}
+        PatchResult::AlreadyPresent => {
+            println!("  settings.json: hook already present");
+            println!("  Restart Claude Code. Test with: git status");
+        }
+        PatchResult::Declined | PatchResult::Skipped => {}
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -816,6 +857,7 @@ fn run_default_mode(
 }
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
+#[allow(dead_code)] // Used on Unix builds only
 fn generate_project_filters_template(verbose: u8) -> Result<()> {
     let rtk_dir = std::path::Path::new(".rtk");
     let path = rtk_dir.join("filters.toml");
@@ -840,6 +882,7 @@ fn generate_project_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Generate ~/.config/rtk/filters.toml template if not present.
+#[allow(dead_code)] // Used on Unix builds only
 fn generate_global_filters_template(verbose: u8) -> Result<()> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
     let rtk_dir = config_dir.join("rtk");
@@ -867,12 +910,33 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 /// Hook-only mode: just the hook, no RTK.md
 #[cfg(not(unix))]
 fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
     _install_opencode: bool,
 ) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
+    if !global {
+        eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
+        eprintln!("    For local projects, use default mode or --claude-md");
+        return Ok(());
+    }
+
+    // On Windows, use the native `rtk hook-rewrite` command
+    let hook_command = "rtk hook-rewrite";
+    let dummy_path = std::path::PathBuf::from(hook_command);
+    let patch_result = patch_settings_json(&dummy_path, patch_mode, verbose, false)?;
+
+    match patch_result {
+        PatchResult::Patched => {
+            println!("Native hook registered (rtk hook-rewrite)");
+        }
+        PatchResult::AlreadyPresent => {
+            println!("Hook already present in settings.json");
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

@@ -26,6 +26,7 @@ mod grep_cmd;
 mod gt_cmd;
 mod hook_audit_cmd;
 mod hook_check;
+mod hook_rewrite_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -638,6 +639,10 @@ enum Commands {
         #[arg(short, long, default_value = "7")]
         since: u64,
     },
+
+    /// Native Claude Code PreToolUse hook (reads JSON from stdin, no jq needed)
+    #[command(name = "hook-rewrite")]
+    HookRewrite,
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
@@ -1960,6 +1965,10 @@ fn main() -> Result<()> {
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
+        }
+
+        Commands::HookRewrite => {
+            hook_rewrite_cmd::run()?;
         }
 
         Commands::Rewrite { args } => {
