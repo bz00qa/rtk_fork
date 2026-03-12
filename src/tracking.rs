@@ -37,7 +37,19 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Type alias for command summary rows: (base_cmd, count, saved_tokens, avg_savings_pct, avg_exec_ms)
+type CommandSummaryRow = (String, usize, usize, f64, u64);
+
 // ── Project path helpers ── // added: project-scoped tracking support
+
+/// Extract the base command (first 3 words) from an rtk_cmd string.
+/// "rtk go test -count=1 ./..." → "rtk go test"
+/// "rtk git status" → "rtk git status"
+/// "rtk find" → "rtk find"
+fn extract_base_cmd(cmd: &str) -> String {
+    let words: Vec<&str> = cmd.split_whitespace().take(3).collect();
+    words.join(" ")
+}
 
 /// Get the canonical project path string for the current working directory.
 fn current_project_path_string() -> String {
@@ -294,6 +306,37 @@ impl Tracker {
                 [],
             );
         }
+        // Migration: add base_cmd column (first 3 words of rtk_cmd for aggregation)
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN base_cmd TEXT DEFAULT ''",
+            [],
+        );
+        // Backfill base_cmd for existing rows that don't have it yet
+        let needs_backfill: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM commands WHERE base_cmd = '' OR base_cmd IS NULL LIMIT 1)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if needs_backfill {
+            let mut read_stmt = conn.prepare(
+                "SELECT id, rtk_cmd FROM commands WHERE base_cmd = '' OR base_cmd IS NULL",
+            )?;
+            let rows: Vec<(i64, String)> = read_stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(read_stmt);
+            for (id, cmd) in &rows {
+                let base = extract_base_cmd(cmd);
+                let _ = conn.execute(
+                    "UPDATE commands SET base_cmd = ?1 WHERE id = ?2",
+                    params![base, id],
+                );
+            }
+        }
+
         // Index for fast project-scoped gain queries // added
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
@@ -315,6 +358,53 @@ impl Tracker {
             [],
         )?;
 
+        Ok(Self { conn })
+    }
+
+    /// Create a tracker backed by an in-memory SQLite database.
+    /// Used exclusively for tests to avoid polluting the real tracking DB.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                original_cmd TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                saved_tokens INTEGER NOT NULL,
+                savings_pct REAL NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
+            [],
+        )?;
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN base_cmd TEXT DEFAULT ''",
+            [],
+        );
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS parse_failures (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                raw_command TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                fallback_succeeded INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
         Ok(Self { conn })
     }
 
@@ -356,20 +446,22 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+        let base_cmd = extract_base_cmd(rtk_cmd);
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, base_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
-                project_path, // added
+                base_cmd,
+                project_path,
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
             ],
         )?;
 
@@ -488,6 +580,7 @@ impl Tracker {
     ///     summary.total_saved, summary.avg_savings_pct);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
         self.get_summary_filtered(None) // delegate to filtered variant
     }
@@ -557,22 +650,44 @@ impl Tracker {
         })
     }
 
-    fn get_by_command(
-        &self,
-        project_path: Option<&str>, // added
-    ) -> Result<Vec<(String, usize, usize, f64, u64)>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+    fn get_by_command(&self, project_path: Option<&str>) -> Result<Vec<CommandSummaryRow>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+            "SELECT base_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
-             GROUP BY rtk_cmd
+               AND base_cmd != ''
+             GROUP BY base_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)? as u64,
+            ))
+        })?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Get all commands grouped by base_cmd (no limit), for coverage reporting.
+    pub fn get_by_command_all(&self, project_path: Option<&str>) -> Result<Vec<CommandSummaryRow>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT base_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
+             FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND base_cmd != ''
+             GROUP BY base_cmd
+             ORDER BY SUM(saved_tokens) DESC",
+        )?;
+
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -851,6 +966,7 @@ impl Tracker {
     /// }
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
         self.get_recent_filtered(limit, None) // delegate to filtered variant
     }
@@ -971,6 +1087,7 @@ fn get_db_path() -> Result<PathBuf> {
 pub struct ParseFailureRecord {
     pub timestamp: String,
     pub raw_command: String,
+    #[allow(dead_code)]
     pub error_message: String,
     pub fallback_succeeded: bool,
 }
@@ -1174,6 +1291,7 @@ pub fn args_display(args: &[OsString]) -> String {
 /// let timer = TimedExecution::start();
 /// timer.track("ls -la", "rtk ls", "input", "output");
 /// ```
+#[allow(dead_code)]
 #[deprecated(note = "Use TimedExecution instead")]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
@@ -1212,58 +1330,41 @@ mod tests {
     // 3. Tracker::record + get_recent — round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-
-        // Use unique test identifier to avoid conflicts with other tests
-        let test_cmd = format!("rtk git status test_{}", std::process::id());
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         tracker
-            .record("git status", &test_cmd, 100, 20, 50)
+            .record("git status", "rtk git status", 100, 20, 50)
             .expect("Failed to record");
 
         let recent = tracker.get_recent(10).expect("Failed to get recent");
+        assert_eq!(recent.len(), 1);
 
-        // Find our specific test record
-        let test_record = recent
-            .iter()
-            .find(|r| r.rtk_cmd == test_cmd)
-            .expect("Test record not found in recent commands");
-
-        assert_eq!(test_record.saved_tokens, 80);
-        assert_eq!(test_record.savings_pct, 80.0);
+        assert_eq!(recent[0].saved_tokens, 80);
+        assert_eq!(recent[0].savings_pct, 80.0);
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
     #[test]
     fn test_track_passthrough_no_dilution() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-
-        // Use unique test identifiers
-        let pid = std::process::id();
-        let cmd1 = format!("rtk cmd1_test_{}", pid);
-        let cmd2 = format!("rtk cmd2_passthrough_test_{}", pid);
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // Record one real command with 80% savings
         tracker
-            .record("cmd1", &cmd1, 1000, 200, 10)
+            .record("cargo build", "rtk cargo build", 1000, 200, 10)
             .expect("Failed to record cmd1");
 
         // Record passthrough (0, 0)
         tracker
-            .record("cmd2", &cmd2, 0, 0, 5)
+            .record("git tag", "rtk git tag (passthrough)", 0, 0, 5)
             .expect("Failed to record passthrough");
 
         // Verify both records exist in recent history
         let recent = tracker.get_recent(20).expect("Failed to get recent");
+        assert_eq!(recent.len(), 2);
 
-        let record1 = recent
-            .iter()
-            .find(|r| r.rtk_cmd == cmd1)
-            .expect("cmd1 record not found");
-        let record2 = recent
-            .iter()
-            .find(|r| r.rtk_cmd == cmd2)
-            .expect("passthrough record not found");
+        // Recent is ordered newest first
+        let record2 = &recent[0]; // passthrough (recorded second)
+        let record1 = &recent[1]; // cargo build (recorded first)
 
         // Verify cmd1 has 80% savings
         assert_eq!(record1.saved_tokens, 800);
@@ -1272,41 +1373,37 @@ mod tests {
         // Verify passthrough has 0% savings
         assert_eq!(record2.saved_tokens, 0);
         assert_eq!(record2.savings_pct, 0.0);
-
-        // This validates that passthrough (0 input, 0 output) doesn't dilute stats
-        // because the savings calculation is correct for both cases
     }
 
-    // 5. TimedExecution::track records with exec_time > 0
+    // 5. Tracker::record with exec_time > 0
     #[test]
-    fn test_timed_execution_records_time() {
-        let timer = TimedExecution::start();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        timer.track("test cmd", "rtk test", "raw input data", "filtered");
+    fn test_tracker_record_with_exec_time() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
-        // Verify via DB that record exists
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        tracker
+            .record("test cmd", "rtk test cmd", 100, 40, 150)
+            .expect("Failed to record");
+
         let recent = tracker.get_recent(5).expect("Failed to get recent");
-        assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].rtk_cmd, "rtk test cmd");
     }
 
-    // 6. TimedExecution::track_passthrough records with 0 tokens
+    // 6. Tracker passthrough records with 0 tokens
     #[test]
-    fn test_timed_execution_passthrough() {
-        let timer = TimedExecution::start();
-        timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+    fn test_tracker_passthrough_record() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
-        let tracker = Tracker::new().expect("Failed to create tracker");
+        tracker
+            .record("git tag", "rtk git tag (passthrough)", 0, 0, 5)
+            .expect("Failed to record passthrough");
+
         let recent = tracker.get_recent(5).expect("Failed to get recent");
-
-        let pt = recent
-            .iter()
-            .find(|r| r.rtk_cmd.contains("passthrough"))
-            .expect("Passthrough record not found");
+        assert_eq!(recent.len(), 1);
 
         // savings_pct should be 0 for passthrough
-        assert_eq!(pt.savings_pct, 0.0);
-        assert_eq!(pt.saved_tokens, 0);
+        assert_eq!(recent[0].savings_pct, 0.0);
+        assert_eq!(recent[0].saved_tokens, 0);
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
@@ -1376,41 +1473,41 @@ mod tests {
     // 12. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let test_cmd = format!("git -C /path status test_{}", std::process::id());
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         tracker
-            .record_parse_failure(&test_cmd, "unrecognized subcommand", true)
+            .record_parse_failure("git -C /path status", "unrecognized subcommand", true)
             .expect("Failed to record parse failure");
 
         let summary = tracker
             .get_parse_failure_summary()
             .expect("Failed to get summary");
 
-        assert!(summary.total >= 1);
-        assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
+        assert_eq!(summary.total, 1);
+        assert!(summary
+            .recent
+            .iter()
+            .any(|r| r.raw_command == "git -C /path status"));
     }
 
     // 13. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
-        let tracker = Tracker::new().expect("Failed to create tracker");
-        let pid = std::process::id();
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // 2 successes, 1 failure
         tracker
-            .record_parse_failure(&format!("cmd_ok1_{}", pid), "err", true)
+            .record_parse_failure("cmd_ok1", "err", true)
             .unwrap();
         tracker
-            .record_parse_failure(&format!("cmd_ok2_{}", pid), "err", true)
+            .record_parse_failure("cmd_ok2", "err", true)
             .unwrap();
         tracker
-            .record_parse_failure(&format!("cmd_fail_{}", pid), "err", false)
+            .record_parse_failure("cmd_fail", "err", false)
             .unwrap();
 
         let summary = tracker.get_parse_failure_summary().unwrap();
-        // We can't assert exact rate because other tests may have added records,
-        // but we can verify recovery_rate is between 0 and 100
-        assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+        // 2 out of 3 succeeded = 66.7%
+        assert!((summary.recovery_rate - 66.7).abs() < 0.1);
     }
 }

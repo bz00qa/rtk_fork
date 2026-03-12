@@ -11,7 +11,7 @@ use registry::{
     category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
 };
-use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+use report::{DiscoverReport, PatternOpportunity, SupportedEntry, TokenConsumer, UnsupportedEntry};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -69,6 +69,8 @@ pub fn run(
     let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
+    // Track all commands by base (first 2 words) for top token consumers
+    let mut consumer_map: HashMap<String, (usize, usize)> = HashMap::new(); // base -> (count, total_output_bytes)
 
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
@@ -84,8 +86,28 @@ pub fn run(
 
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
-            for part in parts {
+            // Find the last non-ignored part — that's the command that actually
+            // produced the output. In chains like `PATH=... && cd dir && npm build`,
+            // only `npm build` should get output_len attributed.
+            let effective_idx = parts
+                .iter()
+                .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+
+            for (idx, part) in parts.iter().enumerate() {
                 total_commands += 1;
+
+                // Accumulate for top token consumers
+                {
+                    let base = consumer_base(part);
+                    if !base.is_empty() {
+                        let entry = consumer_map.entry(base).or_insert((0, 0));
+                        entry.0 += 1;
+                        // Only attribute output to the effective command
+                        if Some(idx) == effective_idx {
+                            entry.1 += ext_cmd.output_len.unwrap_or(0);
+                        }
+                    }
+                }
 
                 // Detect RTK_DISABLED= bypass before classification
                 if has_rtk_disabled_prefix(part) {
@@ -125,11 +147,17 @@ pub fn run(
                         bucket.count += 1;
 
                         // Estimate tokens for this command
-                        let output_tokens = if let Some(len) = ext_cmd.output_len {
-                            // Real: from tool_result content length
-                            len / 4
+                        let output_tokens = if Some(idx) == effective_idx {
+                            if let Some(len) = ext_cmd.output_len {
+                                // Real: from tool_result content length
+                                len / 4
+                            } else {
+                                // Fallback: category average
+                                let subcmd = extract_subcmd(part);
+                                category_avg_tokens(category, subcmd)
+                            }
                         } else {
-                            // Fallback: category average
+                            // Not the effective command — use category average
                             let subcmd = extract_subcmd(part);
                             category_avg_tokens(category, subcmd)
                         };
@@ -166,6 +194,9 @@ pub fn run(
             }
         }
     }
+
+    // Detect patterns across sessions
+    let patterns = detect_patterns(&sessions, &provider, verbose);
 
     // Build report
     let mut supported: Vec<SupportedEntry> = supported_map
@@ -220,6 +251,26 @@ pub fn run(
     // Sort by count descending
     unsupported.sort_by(|a, b| b.count.cmp(&a.count));
 
+    // Build top token consumers
+    let mut consumers: Vec<TokenConsumer> = consumer_map
+        .into_iter()
+        .map(|(base, (count, total_bytes))| {
+            let total_tokens = total_bytes / 4;
+            let avg_tokens = if count > 0 { total_tokens / count } else { 0 };
+            let has_rtk_filter =
+                matches!(classify_command(&base), Classification::Supported { .. });
+            TokenConsumer {
+                command: base,
+                count,
+                total_tokens,
+                avg_tokens,
+                has_rtk_filter,
+            }
+        })
+        .collect();
+    consumers.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+    consumers.truncate(15);
+
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {
         let mut sorted: Vec<_> = rtk_disabled_cmds.into_iter().collect();
@@ -238,6 +289,8 @@ pub fn run(
         since_days,
         supported,
         unsupported,
+        patterns,
+        consumers,
         parse_errors,
         rtk_disabled_count,
         rtk_disabled_examples,
@@ -249,6 +302,203 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// Detect usage patterns that could benefit from RTK meta-commands.
+///
+/// Patterns detected:
+/// 1. Sequential git status+diff+log → rtk context
+/// 2. Same command repeated 3+ times → rtk watch
+/// 3. Commands with large output (>2K chars) → rtk dedup
+fn detect_patterns(
+    sessions: &[std::path::PathBuf],
+    provider: &ClaudeProvider,
+    verbose: u8,
+) -> Vec<PatternOpportunity> {
+    let mut context_count = 0usize;
+    let mut watch_candidates: HashMap<String, usize> = HashMap::new();
+    let mut dedup_candidates: HashMap<String, (usize, usize)> = HashMap::new();
+
+    for session_path in sessions {
+        let extracted = match provider.extract_commands(session_path) {
+            Ok(cmds) => cmds,
+            Err(_) => continue,
+        };
+
+        let mut cmds = extracted;
+        cmds.sort_by_key(|c| c.sequence_index);
+
+        // Detect context pattern: git status near git diff near git log
+        let git_cmds: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| {
+                let t = c.command.trim();
+                if t.starts_with("git status")
+                    || t.starts_with("rtk git status")
+                    || t.starts_with("git diff")
+                    || t.starts_with("rtk git diff")
+                    || t.starts_with("git log")
+                    || t.starts_with("rtk git log")
+                {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for window in git_cmds.windows(3) {
+            let has_status = window.iter().any(|c| c.contains("status"));
+            let has_diff = window.iter().any(|c| c.contains("diff"));
+            let has_log = window.iter().any(|c| c.contains("log"));
+            if has_status && has_diff && has_log {
+                context_count += 1;
+            }
+        }
+
+        // Detect watch pattern: same command base repeated
+        let mut cmd_runs: HashMap<String, usize> = HashMap::new();
+        for cmd in &cmds {
+            if let Some(base) = normalize_cmd_base(&cmd.command) {
+                *cmd_runs.entry(base).or_insert(0) += 1;
+            }
+        }
+        for (base, count) in cmd_runs {
+            if count >= 3 {
+                *watch_candidates.entry(base).or_insert(0) += count;
+            }
+        }
+
+        // Detect dedup pattern: commands with large output
+        for cmd in &cmds {
+            if let Some(len) = cmd.output_len {
+                if len > 2000 {
+                    if let Some(base) = normalize_cmd_base(&cmd.command) {
+                        let entry = dedup_candidates.entry(base).or_insert((0, 0));
+                        entry.0 += 1;
+                        entry.1 += len;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut patterns = Vec::new();
+
+    if context_count > 0 {
+        patterns.push(PatternOpportunity {
+            pattern: "git status + diff + log sequence".to_string(),
+            suggestion: "rtk context".to_string(),
+            occurrences: context_count,
+            estimated_savings_tokens: context_count * 600,
+        });
+    }
+
+    let mut watch_vec: Vec<_> = watch_candidates.into_iter().collect();
+    watch_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    for (cmd, count) in watch_vec.into_iter().take(5) {
+        let est_savings = (count - count / 3) * 150;
+        patterns.push(PatternOpportunity {
+            pattern: format!("{} repeated", cmd),
+            suggestion: format!("rtk watch {}", cmd),
+            occurrences: count,
+            estimated_savings_tokens: est_savings,
+        });
+    }
+
+    let mut dedup_vec: Vec<_> = dedup_candidates.into_iter().collect();
+    dedup_vec.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    for (cmd, (count, total_bytes)) in dedup_vec.into_iter().take(5) {
+        if count >= 2 {
+            let est_savings = total_bytes / 4 * 30 / 100;
+            patterns.push(PatternOpportunity {
+                pattern: format!("{} (large output)", cmd),
+                suggestion: format!("rtk dedup {}", cmd),
+                occurrences: count,
+                estimated_savings_tokens: est_savings,
+            });
+        }
+    }
+
+    if verbose > 0 && !patterns.is_empty() {
+        eprintln!("Detected {} usage patterns", patterns.len());
+    }
+
+    patterns
+}
+
+/// Commands not meaningful for watch/dedup pattern detection
+const PATTERN_SKIP_PREFIXES: &[&str] = &[
+    "cd ", "cd\t", "ls", "echo ", "cat ", "pwd", "mkdir ", "rm ", "cp ", "mv ", "touch ", "chmod ",
+    "export ", "source ", ".", "PATH=", "SKIP_ENV", "set ", "unset ", "head ", "tail ", "wc ",
+    "which ", "where ", "type ",
+];
+
+/// Normalize a command to its base form for comparison.
+fn normalize_cmd_base(cmd: &str) -> Option<String> {
+    let trimmed = cmd.trim();
+
+    for prefix in PATTERN_SKIP_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            return None;
+        }
+    }
+
+    if trimmed.contains('=') && !trimmed.contains(' ') {
+        return None;
+    }
+
+    let stripped = trimmed.strip_prefix("rtk ").unwrap_or(trimmed);
+    let parts: Vec<&str> = stripped.splitn(3, char::is_whitespace).collect();
+    match parts.len() {
+        0 => None,
+        1 => Some(parts[0].to_string()),
+        _ => Some(format!("{} {}", parts[0], parts[1])),
+    }
+}
+
+/// Extract a smart base key for top-token-consumer grouping.
+fn consumer_base(cmd: &str) -> String {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    // python/python3 -m <module> → keep 3 words
+    if (words[0] == "python" || words[0] == "python3") && words.len() >= 3 && words[1] == "-m" {
+        return format!("{} -m {}", words[0], words[2]);
+    }
+
+    // pnpm with flags before the subcommand
+    if words[0] == "pnpm" && words.len() >= 2 {
+        let mut i = 1;
+        while i < words.len() {
+            if (words[i] == "--filter" || words[i] == "-F") && i + 1 < words.len() {
+                i += 2;
+            } else if words[i].starts_with("--filter=") || words[i].starts_with("-F") {
+                i += 1;
+            } else if words[i] == "-r"
+                || words[i] == "--recursive"
+                || words[i] == "-w"
+                || words[i] == "--workspace-root"
+            {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if i < words.len() {
+            return format!("pnpm {}", words[i]);
+        }
+        return "pnpm".to_string();
+    }
+
+    // Default: first 2 words
+    if words.len() >= 2 {
+        format!("{} {}", words[0], words[1])
+    } else {
+        words[0].to_string()
+    }
 }
 
 /// Extract the subcommand from a command string (second word).
