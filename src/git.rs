@@ -272,6 +272,17 @@ fn is_blob_show_arg(arg: &str) -> bool {
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
+    let raw_line_count = diff.lines().count();
+
+    // Auto stat-only for very large diffs (>1000 raw lines)
+    if raw_line_count > 1000 {
+        let file_count = diff.lines().filter(|l| l.starts_with("diff --git")).count();
+        return format!(
+            "(large diff: {} files, {} lines — showing stat only)",
+            file_count, raw_line_count
+        );
+    }
+
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;
@@ -290,6 +301,10 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             result.push(format!("\n📄 {}", current_file));
             added = 0;
             removed = 0;
+            in_hunk = false;
+        } else if line.starts_with("Binary files") {
+            // Skip binary file content
+            result.push("  (binary file)".to_string());
             in_hunk = false;
         } else if line.starts_with("@@") {
             // New hunk
@@ -310,13 +325,9 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                     result.push(format!("  {}", line));
                     hunk_lines += 1;
                 }
-            } else if hunk_lines < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_lines > 0 {
-                    result.push(format!("  {}", line));
-                    hunk_lines += 1;
-                }
             }
+            // Skip context lines entirely — only show +/- changes
+            // This is the "smarter" part: context is noise for LLMs
 
             if hunk_lines == max_hunk_lines {
                 result.push("  ... (truncated)".to_string());
@@ -355,7 +366,7 @@ fn run_log(
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
             || arg == "-n"
             || arg.starts_with("--max-count")
     });
@@ -433,7 +444,7 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
         // -20 (combined digit form)
         if arg.starts_with('-')
             && arg.len() > 1
-            && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+            && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
                 return Some(n);
@@ -815,7 +826,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         // Extract commit hash from output like "[main abc1234] message"
         let compact = if let Some(line) = stdout.lines().next() {
             if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').last().unwrap_or("");
+                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
                     format!("ok ✓ {}", &hash[..7.min(hash.len())])
                 } else {
@@ -2057,5 +2068,43 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_compact_diff_large_auto_stat() {
+        let mut diff = String::new();
+        for f in 1..=20 {
+            diff.push_str(&format!("diff --git a/file{f}.rs b/file{f}.rs\n--- a/file{f}.rs\n+++ b/file{f}.rs\n@@ -1,50 +1,50 @@\n"));
+            for i in 1..=50 {
+                diff.push_str(&format!("+line{f}_{i}\n"));
+            }
+        }
+        assert!(diff.lines().count() > 1000);
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("large diff"),
+            "Should auto-switch to stat-only for >1000 line diffs"
+        );
+        assert!(result.contains("20 files"));
+    }
+
+    #[test]
+    fn test_compact_diff_binary_file() {
+        let diff =
+            "diff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n";
+        let result = compact_diff(diff, 100);
+        assert!(result.contains("image.png"));
+        assert!(result.contains("(binary file)"));
+    }
+
+    #[test]
+    fn test_compact_diff_no_context_lines() {
+        let diff = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,5 +1,6 @@\n use std::io;\n fn main() {\n+    println!(\"hello\");\n     let x = 1;\n }\n";
+        let result = compact_diff(diff, 100);
+        assert!(result.contains("+    println!(\"hello\");"));
+        assert!(
+            !result.contains("use std::io"),
+            "Context lines should be stripped"
+        );
     }
 }

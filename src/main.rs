@@ -125,6 +125,9 @@ enum Commands {
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Markdown diet mode: strip examples, collapse tables, remove verbose sections
+        #[arg(short, long)]
+        diet: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -1228,9 +1231,12 @@ fn main() -> Result<()> {
             max_lines,
             tail_lines,
             line_numbers,
+            diet,
         } => {
             if file == Path::new("-") {
                 read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)?;
+            } else if diet {
+                read::run_diet(&file, cli.verbose)?;
             } else {
                 read::run(
                     &file,
