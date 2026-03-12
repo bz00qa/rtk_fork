@@ -8,6 +8,71 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+/// Command-to-category registry for coverage reporting.
+/// Categories match `--help` display_order grouping.
+/// Excludes meta/internal commands (gain, discover, init, verify, etc.)
+const COMMAND_REGISTRY: &[(&str, &str)] = &[
+    // Git & VCS
+    ("git", "Git & VCS"),
+    ("gh", "Git & VCS"),
+    ("gt", "Git & VCS"),
+    // Build & Compile
+    ("cargo", "Build & Compile"),
+    ("tsc", "Build & Compile"),
+    ("next", "Build & Compile"),
+    ("lint", "Build & Compile"),
+    ("prettier", "Build & Compile"),
+    ("format", "Build & Compile"),
+    // Test
+    ("test", "Test"),
+    ("vitest", "Test"),
+    ("playwright", "Test"),
+    ("pytest", "Test"),
+    // Languages
+    ("go", "Languages"),
+    ("golangci-lint", "Languages"),
+    ("ruff", "Languages"),
+    ("mypy", "Languages"),
+    ("pip", "Languages"),
+    ("deno", "Languages"),
+    // Package Managers
+    ("pnpm", "Package Managers"),
+    ("npm", "Package Managers"),
+    ("npx", "Package Managers"),
+    ("bun", "Package Managers"),
+    ("bunx", "Package Managers"),
+    ("prisma", "Package Managers"),
+    // Files & Search
+    ("ls", "Files & Search"),
+    ("tree", "Files & Search"),
+    ("read", "Files & Search"),
+    ("find", "Files & Search"),
+    ("grep", "Files & Search"),
+    ("diff", "Files & Search"),
+    ("wc", "Files & Search"),
+    // Analysis & Debug
+    ("err", "Analysis & Debug"),
+    ("json", "Analysis & Debug"),
+    ("deps", "Analysis & Debug"),
+    ("env", "Analysis & Debug"),
+    ("log", "Analysis & Debug"),
+    ("summary", "Analysis & Debug"),
+    ("smart", "Analysis & Debug"),
+    // Infrastructure
+    ("docker", "Infrastructure"),
+    ("kubectl", "Infrastructure"),
+    ("aws", "Infrastructure"),
+    ("psql", "Infrastructure"),
+    ("curl", "Infrastructure"),
+    ("wget", "Infrastructure"),
+    // Meta Commands
+    ("context", "Meta Commands"),
+    ("dedup", "Meta Commands"),
+    ("watch", "Meta Commands"),
+    ("proxy", "Meta Commands"),
+];
+
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
     graph: bool,
@@ -131,7 +196,7 @@ pub fn run(
 
         if !summary.by_command.is_empty() {
             // added: styled section header
-            println!("{}", styled("By Command", true));
+            println!("{}", styled("By Command (top 10)", true));
 
             // added: dynamic column widths for clean alignment
             let cmd_width = 24usize;
@@ -158,9 +223,12 @@ pub fn run(
                 .unwrap_or(6)
                 .max(6);
 
+            let cat_width = 16usize;
             let table_width = 3
                 + 2
                 + cmd_width
+                + 2
+                + cat_width
                 + 2
                 + count_width
                 + 2
@@ -173,9 +241,9 @@ pub fn run(
                 + impact_width;
             println!("{}", "─".repeat(table_width));
             println!(
-                "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
-                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
-                cmd_width = cmd_width, count_width = count_width,
+                "{:>3}  {:<cmd_width$}  {:<cat_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
+                "#", "Command", "Category", "Count", "Saved", "Avg%", "Time", "Impact",
+                cmd_width = cmd_width, cat_width = cat_width, count_width = count_width,
                 saved_width = saved_width, time_width = time_width,
                 impact_width = impact_width
             );
@@ -190,7 +258,9 @@ pub fn run(
 
             for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
                 let row_idx = format!("{:>2}.", idx + 1);
-                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
+                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width));
+                let cat = lookup_category(cmd);
+                let cat_cell = truncate_for_column(cat, cat_width);
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
                     "{:>saved_width$}",
@@ -198,21 +268,35 @@ pub fn run(
                     saved_width = saved_width
                 );
                 let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
-                let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
+                let pct_cell = colorize_pct_cell(*pct, &pct_plain);
                 let time_cell = format!(
                     "{:>time_width$}",
                     format_duration(*avg_time),
                     time_width = time_width
                 );
-                let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
+                let impact = mini_bar(*saved, max_saved, impact_width);
                 println!(
-                    "{}  {}  {}  {}  {}  {}  {}",
-                    row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
+                    "{}  {}  {}  {}  {}  {}  {}  {}",
+                    row_idx,
+                    cmd_cell,
+                    cat_cell,
+                    count_cell,
+                    saved_cell,
+                    pct_cell,
+                    time_cell,
+                    impact
                 );
             }
             println!("{}", "─".repeat(table_width));
             println!();
         }
+
+        // Command Coverage section
+        let all_commands = tracker
+            .get_by_command_all(project_scope.as_deref())
+            .context("Failed to load command coverage data")?;
+        print_command_coverage(&all_commands);
+        print_routing_breakdown(&all_commands);
 
         if graph && !summary.by_day.is_empty() {
             println!("{}", styled("Daily Savings (last 30 days)", true)); // added: styled header
@@ -393,6 +477,18 @@ fn print_efficiency_meter(pct: f64) {
     }
 }
 
+/// Look up the category for a base_cmd (e.g., "rtk git status" → "Git & VCS").
+fn lookup_category(base_cmd: &str) -> &'static str {
+    let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let cmd_name = parts[1];
+        if let Some(&(_, category)) = COMMAND_REGISTRY.iter().find(|&&(c, _)| c == cmd_name) {
+            return category;
+        }
+    }
+    "Other"
+}
+
 /// Resolve project scope from --project flag. // added
 fn resolve_project_scope(project: bool) -> Result<Option<String>> {
     if !project {
@@ -424,6 +520,213 @@ fn shorten_path(path: &str) -> String {
             comps[comps.len() - 1]
         )
     }
+}
+
+/// Print command coverage table grouped by category.
+/// Shows used/available, count, saved tokens, avg%, and unused command names.
+fn print_command_coverage(by_command: &[(String, usize, usize, f64, u64)]) {
+    const CATEGORY_ORDER: &[&str] = &[
+        "Git & VCS",
+        "Build & Compile",
+        "Test",
+        "Languages",
+        "Package Managers",
+        "Files & Search",
+        "Analysis & Debug",
+        "Infrastructure",
+        "Meta Commands",
+    ];
+
+    let mut used_cmds: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (base_cmd, _, _, _, _) in by_command {
+        let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+        if parts.len() >= 2 {
+            used_cmds.insert(parts[1].to_string());
+        }
+    }
+
+    struct CatStats {
+        available: Vec<&'static str>,
+        used: Vec<&'static str>,
+        count: usize,
+        saved: usize,
+        total_pct: f64,
+        pct_entries: usize,
+    }
+
+    let mut cats: std::collections::HashMap<&str, CatStats> = std::collections::HashMap::new();
+
+    for &(cmd, category) in COMMAND_REGISTRY {
+        let entry = cats.entry(category).or_insert_with(|| CatStats {
+            available: Vec::new(),
+            used: Vec::new(),
+            count: 0,
+            saved: 0,
+            total_pct: 0.0,
+            pct_entries: 0,
+        });
+        if !entry.available.contains(&cmd) {
+            entry.available.push(cmd);
+        }
+        if used_cmds.contains(cmd) && !entry.used.contains(&cmd) {
+            entry.used.push(cmd);
+        }
+    }
+
+    for (base_cmd, count, saved, pct, _) in by_command {
+        let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let cmd_name = parts[1];
+        if let Some(&(_, category)) = COMMAND_REGISTRY.iter().find(|&&(c, _)| c == cmd_name) {
+            if let Some(cat) = cats.get_mut(category) {
+                cat.count += count;
+                cat.saved += saved;
+                cat.total_pct += pct * (*count as f64);
+                cat.pct_entries += count;
+            }
+        }
+    }
+
+    let total_used: usize = cats.values().map(|c| c.used.len()).sum();
+    let total_avail: usize = cats.values().map(|c| c.available.len()).sum();
+    let grand_count: usize = cats.values().map(|c| c.count).sum();
+    let grand_saved: usize = cats.values().map(|c| c.saved).sum();
+    let grand_pct_entries: usize = cats.values().map(|c| c.pct_entries).sum();
+    let grand_avg_pct = if grand_pct_entries > 0 {
+        cats.values().map(|c| c.total_pct).sum::<f64>() / grand_pct_entries as f64
+    } else {
+        0.0
+    };
+
+    println!(
+        "{}",
+        styled(
+            &format!(
+                "Command Coverage ({} / {} commands used)",
+                total_used, total_avail
+            ),
+            true,
+        )
+    );
+    let table_width = 72;
+    println!("{}", "\u{2500}".repeat(table_width));
+    println!(
+        "  {:<20} {:>10}  {:>5}  {:>8}  {:>5}   Unused",
+        "Category", "Used/Avail", "Count", "Saved", "Avg%"
+    );
+    println!("{}", "\u{2500}".repeat(table_width));
+
+    // Sort categories by saved tokens descending (active categories first)
+    let mut sorted_cats: Vec<&&str> = CATEGORY_ORDER.iter().collect();
+    sorted_cats.sort_by(|a, b| {
+        let a_saved = cats.get(**a).map(|c| c.saved).unwrap_or(0);
+        let b_saved = cats.get(**b).map(|c| c.saved).unwrap_or(0);
+        b_saved.cmp(&a_saved)
+    });
+
+    for cat_name in &sorted_cats {
+        if let Some(cat) = cats.get(**cat_name) {
+            let used_avail = format!("{} / {}", cat.used.len(), cat.available.len());
+            let avg_pct = if cat.pct_entries > 0 {
+                cat.total_pct / cat.pct_entries as f64
+            } else {
+                0.0
+            };
+
+            let unused: Vec<&str> = cat
+                .available
+                .iter()
+                .filter(|cmd| !cat.used.contains(cmd))
+                .copied()
+                .collect();
+            let unused_str = if unused.is_empty() {
+                "\u{2014}".to_string()
+            } else if unused.len() <= 3 {
+                unused.join(", ")
+            } else {
+                format!("{}, {}...", unused[..2].join(", "), unused.len() - 2)
+            };
+
+            let pct_str = if cat.count > 0 {
+                let plain = format!("{:.1}%", avg_pct);
+                colorize_pct_cell(avg_pct, &plain)
+            } else {
+                "    \u{2014}".to_string()
+            };
+
+            let saved_str = if cat.saved > 0 {
+                format_tokens(cat.saved)
+            } else {
+                "0".to_string()
+            };
+
+            println!(
+                "  {:<20} {:>10}  {:>5}  {:>8}  {}   {}",
+                **cat_name, used_avail, cat.count, saved_str, pct_str, unused_str
+            );
+        }
+    }
+
+    println!("{}", "\u{2500}".repeat(table_width));
+    let total_used_avail = format!("{} / {} used", total_used, total_avail);
+    let grand_pct_plain = format!("{:.1}%", grand_avg_pct);
+    let grand_pct_cell = colorize_pct_cell(grand_avg_pct, &grand_pct_plain);
+    let impact = mini_bar(grand_saved, grand_saved, 10);
+    println!(
+        "  {:<20} {:>10}  {:>5}  {:>8}  {}  {}",
+        "Total",
+        total_used_avail,
+        grand_count,
+        format_tokens(grand_saved),
+        grand_pct_cell,
+        impact
+    );
+
+    println!();
+    println!("  Tip: Run 'rtk discover --all' to find missed savings opportunities");
+    println!("{}", "\u{2500}".repeat(table_width));
+    println!();
+}
+
+fn print_routing_breakdown(by_command: &[(String, usize, usize, f64, u64)]) {
+    let mut dedicated = 0usize;
+    let mut proxy = 0usize;
+    let mut other = 0usize;
+
+    for (base_cmd, count, _, _, _) in by_command {
+        let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+        if parts.len() < 2 {
+            other += count;
+            continue;
+        }
+        let cmd_name = parts[1];
+        if cmd_name == "proxy" {
+            proxy += count;
+        } else if COMMAND_REGISTRY.iter().any(|&(c, _)| c == cmd_name) {
+            dedicated += count;
+        } else {
+            other += count;
+        }
+    }
+
+    println!("{}", styled("Routing Breakdown", true));
+    let table_width = 56;
+    println!("{}", "\u{2500}".repeat(table_width));
+    println!(
+        "  Dedicated filters:  {:>6} commands  (specialized output)",
+        dedicated
+    );
+    println!(
+        "  Proxy passthrough:  {:>6} commands  (raw output tracked)",
+        proxy
+    );
+    if other > 0 {
+        println!("  Other:              {:>6} commands", other);
+    }
+    println!("{}", "\u{2500}".repeat(table_width));
+    println!();
 }
 
 fn print_ascii_graph(data: &[(String, usize)]) {
@@ -486,6 +789,8 @@ struct ExportData {
     weekly: Option<Vec<WeekStats>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     monthly: Option<Vec<MonthStats>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<ExportCoverage>,
 }
 
 #[derive(Serialize)]
@@ -499,6 +804,24 @@ struct ExportSummary {
     avg_time_ms: u64,
 }
 
+#[derive(Serialize)]
+struct ExportCoverage {
+    total_used: usize,
+    total_available: usize,
+    categories: Vec<ExportCategoryStats>,
+}
+
+#[derive(Serialize)]
+struct ExportCategoryStats {
+    category: String,
+    used: usize,
+    available: usize,
+    count: usize,
+    saved_tokens: usize,
+    avg_savings_pct: f64,
+    unused_commands: Vec<String>,
+}
+
 fn export_json(
     tracker: &Tracker,
     daily: bool,
@@ -510,6 +833,103 @@ fn export_json(
     let summary = tracker
         .get_summary_filtered(project_scope) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
+
+    // Build coverage data
+    let all_commands = tracker
+        .get_by_command_all(project_scope)
+        .context("Failed to load command coverage data for JSON export")?;
+
+    let mut used_cmds: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (base_cmd, _, _, _, _) in &all_commands {
+        let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+        if parts.len() >= 2 {
+            used_cmds.insert(parts[1].to_string());
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    let mut cat_map: std::collections::HashMap<
+        &str,
+        (Vec<&str>, Vec<&str>, usize, usize, f64, usize),
+    > = std::collections::HashMap::new();
+
+    for &(cmd, category) in COMMAND_REGISTRY {
+        let entry = cat_map
+            .entry(category)
+            .or_insert_with(|| (Vec::new(), Vec::new(), 0, 0, 0.0, 0));
+        if !entry.0.contains(&cmd) {
+            entry.0.push(cmd);
+        }
+        if used_cmds.contains(cmd) && !entry.1.contains(&cmd) {
+            entry.1.push(cmd);
+        }
+    }
+
+    for (base_cmd, count, saved, pct, _) in &all_commands {
+        let parts: Vec<&str> = base_cmd.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let cmd_name = parts[1];
+        if let Some(&(_, category)) = COMMAND_REGISTRY.iter().find(|&&(c, _)| c == cmd_name) {
+            if let Some(cat) = cat_map.get_mut(category) {
+                cat.2 += count;
+                cat.3 += saved;
+                cat.4 += pct * (*count as f64);
+                cat.5 += count;
+            }
+        }
+    }
+
+    let total_used: usize = cat_map.values().map(|c| c.1.len()).sum();
+    let total_available: usize = cat_map.values().map(|c| c.0.len()).sum();
+
+    let category_order = [
+        "Git & VCS",
+        "Build & Compile",
+        "Test",
+        "Languages",
+        "Package Managers",
+        "Files & Search",
+        "Analysis & Debug",
+        "Infrastructure",
+        "Meta Commands",
+    ];
+
+    let categories: Vec<ExportCategoryStats> = category_order
+        .iter()
+        .filter_map(|&cat_name| {
+            cat_map
+                .get(cat_name)
+                .map(|(available, used, count, saved, total_pct, pct_entries)| {
+                    let avg_pct = if *pct_entries > 0 {
+                        *total_pct / *pct_entries as f64
+                    } else {
+                        0.0
+                    };
+                    let unused_commands: Vec<String> = available
+                        .iter()
+                        .filter(|cmd| !used.contains(cmd))
+                        .map(|cmd| cmd.to_string())
+                        .collect();
+                    ExportCategoryStats {
+                        category: cat_name.to_string(),
+                        used: used.len(),
+                        available: available.len(),
+                        count: *count,
+                        saved_tokens: *saved,
+                        avg_savings_pct: avg_pct,
+                        unused_commands,
+                    }
+                })
+        })
+        .collect();
+
+    let coverage_data = ExportCoverage {
+        total_used,
+        total_available,
+        categories,
+    };
 
     let export = ExportData {
         summary: ExportSummary {
@@ -536,6 +956,7 @@ fn export_json(
         } else {
             None
         },
+        coverage: Some(coverage_data),
     };
 
     let json = serde_json::to_string_pretty(&export)?;
@@ -720,4 +1141,81 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command_registry_categories_valid() {
+        let valid_cats = [
+            "Git & VCS",
+            "Build & Compile",
+            "Test",
+            "Languages",
+            "Package Managers",
+            "Files & Search",
+            "Analysis & Debug",
+            "Infrastructure",
+            "Meta Commands",
+        ];
+        for &(cmd, cat) in COMMAND_REGISTRY {
+            assert!(
+                valid_cats.contains(&cat),
+                "Command '{}' has unknown category '{}'",
+                cmd,
+                cat
+            );
+        }
+    }
+
+    #[test]
+    fn test_command_registry_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for &(cmd, _) in COMMAND_REGISTRY {
+            assert!(seen.insert(cmd), "Duplicate command in registry: '{}'", cmd);
+        }
+    }
+
+    #[test]
+    fn test_lookup_category_known() {
+        assert_eq!(lookup_category("rtk git status"), "Git & VCS");
+        assert_eq!(lookup_category("rtk cargo test"), "Build & Compile");
+        assert_eq!(lookup_category("rtk pytest"), "Test");
+        assert_eq!(lookup_category("rtk docker ps"), "Infrastructure");
+    }
+
+    #[test]
+    fn test_lookup_category_unknown() {
+        assert_eq!(lookup_category("rtk unknown-cmd"), "Other");
+        assert_eq!(lookup_category("single"), "Other");
+    }
+
+    #[test]
+    fn test_print_command_coverage_empty() {
+        print_command_coverage(&[]);
+    }
+
+    #[test]
+    fn test_print_command_coverage_with_data() {
+        let data = vec![
+            (
+                "rtk git status".to_string(),
+                10usize,
+                5000usize,
+                70.0f64,
+                100u64,
+            ),
+            (
+                "rtk cargo test".to_string(),
+                5usize,
+                10000usize,
+                90.0f64,
+                200u64,
+            ),
+            ("rtk find".to_string(), 20usize, 3000usize, 80.0f64, 10u64),
+        ];
+        print_command_coverage(&data);
+    }
 }
