@@ -5,6 +5,15 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+
+### Features
+
+* **bun:** add Bun runtime support — install/add/remove, test, build, run, pm ls (~80-90% reduction)
+* **bunx:** add Bunx tool execution with smart routing (tsc→tsc filter, eslint→lint filter)
+* **deno:** add Deno runtime support — test, lint, check, run, task, compile, install (~90% reduction)
+
 ## [0.28.2](https://github.com/rtk-ai/rtk/compare/v0.28.1...v0.28.2) (2026-03-10)
 
 
