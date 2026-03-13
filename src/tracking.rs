@@ -46,8 +46,22 @@ type CommandSummaryRow = (String, usize, usize, f64, u64);
 /// "rtk go test -count=1 ./..." → "rtk go test"
 /// "rtk git status" → "rtk git status"
 /// "rtk find" → "rtk find"
+///
+/// Also normalizes words with trailing `_\d+` suffixes (e.g. test-generated
+/// command names like `cmd1_test_19952`) so they group together in analytics.
 fn extract_base_cmd(cmd: &str) -> String {
-    let words: Vec<&str> = cmd.split_whitespace().take(3).collect();
+    use lazy_static::lazy_static;
+    use regex::Regex;
+
+    lazy_static! {
+        static ref NUMERIC_SUFFIX: Regex = Regex::new(r"_\d+$").unwrap();
+    }
+
+    let words: Vec<String> = cmd
+        .split_whitespace()
+        .take(3)
+        .map(|w| NUMERIC_SUFFIX.replace(w, "").to_string())
+        .collect();
     words.join(" ")
 }
 
@@ -334,6 +348,26 @@ impl Tracker {
                     "UPDATE commands SET base_cmd = ?1 WHERE id = ?2",
                     params![base, id],
                 );
+            }
+        }
+
+        // Re-normalize base_cmd to strip trailing _\d+ suffixes (grouping fix)
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT id, rtk_cmd, base_cmd FROM commands WHERE base_cmd GLOB '*_[0-9]*'")
+        {
+            let rows: Vec<(i64, String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map(|mapped| mapped.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default();
+            drop(stmt);
+            for (id, cmd, old_base) in &rows {
+                let new_base = extract_base_cmd(cmd);
+                if new_base != *old_base {
+                    let _ = conn.execute(
+                        "UPDATE commands SET base_cmd = ?1 WHERE id = ?2",
+                        params![new_base, id],
+                    );
+                }
             }
         }
 
@@ -1509,5 +1543,29 @@ mod tests {
         let summary = tracker.get_parse_failure_summary().unwrap();
         // 2 out of 3 succeeded = 66.7%
         assert!((summary.recovery_rate - 66.7).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_extract_base_cmd_normal() {
+        assert_eq!(extract_base_cmd("rtk git status"), "rtk git status");
+        assert_eq!(extract_base_cmd("rtk cargo test -v"), "rtk cargo test");
+        assert_eq!(extract_base_cmd("rtk find"), "rtk find");
+    }
+
+    #[test]
+    fn test_extract_base_cmd_strips_numeric_suffix() {
+        // Test-generated commands with random IDs should group together
+        assert_eq!(extract_base_cmd("rtk cmd1_test_19952"), "rtk cmd1_test");
+        assert_eq!(extract_base_cmd("rtk cmd1_test_24604"), "rtk cmd1_test");
+        assert_eq!(extract_base_cmd("rtk cmd1_test_99999"), "rtk cmd1_test");
+    }
+
+    #[test]
+    fn test_extract_base_cmd_preserves_non_numeric() {
+        assert_eq!(extract_base_cmd("rtk my_cmd foo"), "rtk my_cmd foo");
+        assert_eq!(
+            extract_base_cmd("rtk golangci-lint run"),
+            "rtk golangci-lint run"
+        );
     }
 }
