@@ -1,3 +1,4 @@
+mod auto_filter;
 mod aws_cmd;
 mod binlog;
 mod cargo_cmd;
@@ -5,7 +6,9 @@ mod cc_economics;
 mod ccusage;
 mod config;
 mod container;
+mod context_cmd;
 mod curl_cmd;
+mod dedup;
 mod deps;
 mod diff_cmd;
 mod discover;
@@ -60,6 +63,7 @@ mod tsc_cmd;
 mod utils;
 mod verify_cmd;
 mod vitest_cmd;
+mod watch_cmd;
 mod wc_cmd;
 mod wget_cmd;
 
@@ -290,6 +294,31 @@ enum Commands {
     /// Run command and show heuristic summary
     Summary {
         /// Command to run and summarize
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Combined git status + diff + log in one call (session-deduplicated)
+    Context {
+        /// Max recent commits to show
+        #[arg(short = 'n', long, default_value = "5")]
+        log_count: usize,
+    },
+
+    /// Run command and show only what changed since last run
+    Watch {
+        /// Command to run and diff against previous output
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Clear watch cache (reset diff history)
+    #[command(name = "watch-clear", display_order = 93)]
+    WatchClear,
+
+    /// Deduplicate noisy command output (compile lines, warnings, etc.)
+    Dedup {
+        /// Command to run and deduplicate (omit to read from stdin)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -568,6 +597,9 @@ enum Commands {
 
     /// Execute command without filtering but track usage
     Proxy {
+        /// Apply auto noise reduction (ANSI strip, dedup, truncate)
+        #[arg(short = 'f', long)]
+        filter: bool,
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
@@ -1568,6 +1600,53 @@ fn main() -> Result<()> {
             summary::run(&cmd, cli.verbose)?;
         }
 
+        Commands::Context { log_count } => {
+            context_cmd::run(log_count, cli.verbose)?;
+        }
+
+        Commands::Dedup { command } => {
+            let timer = tracking::TimedExecution::start();
+            let (raw_cmd, output) = if command.is_empty() {
+                // Read from stdin
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin()
+                    .lock()
+                    .read_to_string(&mut buf)
+                    .context("Failed to read stdin")?;
+                ("(stdin)".to_string(), buf)
+            } else {
+                // Run command and capture output
+                let cmd_str = command.join(" ");
+                let result = if cfg!(target_os = "windows") {
+                    std::process::Command::new("cmd")
+                        .args(["/C", &cmd_str])
+                        .output()
+                } else {
+                    std::process::Command::new("sh")
+                        .args(["-c", &cmd_str])
+                        .output()
+                }
+                .context("Failed to execute command")?;
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                (cmd_str, format!("{}{}", stdout, stderr))
+            };
+            let deduped = dedup::dedup_output(&output);
+            let deduped = dedup::dedup_identical(&deduped);
+            println!("{}", deduped);
+            timer.track(&raw_cmd, "rtk dedup", &output, &deduped);
+        }
+
+        Commands::Watch { command } => {
+            let cmd_str = command.join(" ");
+            watch_cmd::run(&cmd_str, cli.verbose)?;
+        }
+
+        Commands::WatchClear => {
+            watch_cmd::clear()?;
+        }
+
         Commands::Grep {
             pattern,
             path,
@@ -1967,7 +2046,7 @@ fn main() -> Result<()> {
             rewrite_cmd::run(&cmd)?;
         }
 
-        Commands::Proxy { args } => {
+        Commands::Proxy { filter, args } => {
             use std::io::{Read, Write};
             use std::process::Stdio;
             use std::thread;
@@ -2002,89 +2081,123 @@ fn main() -> Result<()> {
             };
 
             if cli.verbose > 0 {
-                eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
+                eprintln!(
+                    "Proxy mode{}: {} {}",
+                    if filter { " (filtered)" } else { "" },
+                    cmd_name,
+                    cmd_args.join(" ")
+                );
             }
 
-            let mut child = utils::resolved_command(cmd_name.as_ref())
-                .args(&cmd_args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context(format!("Failed to execute command: {}", cmd_name))?;
+            if filter {
+                // Filtered mode: capture all output, apply auto_filter, then print
+                let child_output = utils::resolved_command(cmd_name.as_ref())
+                    .args(&cmd_args)
+                    .output()
+                    .context(format!("Failed to execute command: {}", cmd_name))?;
 
-            let stdout_pipe = child
-                .stdout
-                .take()
-                .context("Failed to capture child stdout")?;
-            let stderr_pipe = child
-                .stderr
-                .take()
-                .context("Failed to capture child stderr")?;
+                let stdout = String::from_utf8_lossy(&child_output.stdout);
+                let stderr = String::from_utf8_lossy(&child_output.stderr);
+                let full_output = format!("{}{}", stdout, stderr);
+                let success = child_output.status.success();
 
-            let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stdout_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
+                let (filtered_output, _) = auto_filter::filter_with_status(&full_output, success);
 
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
-                    }
-                    captured.extend_from_slice(&buf[..count]);
-                    let mut out = std::io::stdout().lock();
-                    out.write_all(&buf[..count])?;
-                    out.flush()?;
+                println!("{}", filtered_output);
+
+                timer.track(
+                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
+                    &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
+                    &full_output,
+                    &filtered_output,
+                );
+
+                if !success {
+                    std::process::exit(child_output.status.code().unwrap_or(1));
                 }
+            } else {
+                // Raw passthrough mode: stream output and track usage
+                let mut child = utils::resolved_command(cmd_name.as_ref())
+                    .args(&cmd_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context(format!("Failed to execute command: {}", cmd_name))?;
 
-                Ok(captured)
-            });
+                let stdout_pipe = child
+                    .stdout
+                    .take()
+                    .context("Failed to capture child stdout")?;
+                let stderr_pipe = child
+                    .stderr
+                    .take()
+                    .context("Failed to capture child stderr")?;
 
-            let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                let mut reader = stderr_pipe;
-                let mut captured = Vec::new();
-                let mut buf = [0u8; 8192];
+                let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                    let mut reader = stdout_pipe;
+                    let mut captured = Vec::new();
+                    let mut buf = [0u8; 8192];
 
-                loop {
-                    let count = reader.read(&mut buf)?;
-                    if count == 0 {
-                        break;
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        captured.extend_from_slice(&buf[..count]);
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(&buf[..count])?;
+                        out.flush()?;
                     }
-                    captured.extend_from_slice(&buf[..count]);
-                    let mut err = std::io::stderr().lock();
-                    err.write_all(&buf[..count])?;
-                    err.flush()?;
+
+                    Ok(captured)
+                });
+
+                let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                    let mut reader = stderr_pipe;
+                    let mut captured = Vec::new();
+                    let mut buf = [0u8; 8192];
+
+                    loop {
+                        let count = reader.read(&mut buf)?;
+                        if count == 0 {
+                            break;
+                        }
+                        captured.extend_from_slice(&buf[..count]);
+                        let mut err = std::io::stderr().lock();
+                        err.write_all(&buf[..count])?;
+                        err.flush()?;
+                    }
+
+                    Ok(captured)
+                });
+
+                let status = child
+                    .wait()
+                    .context(format!("Failed waiting for command: {}", cmd_name))?;
+
+                let stdout_bytes = stdout_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
+                let stderr_bytes = stderr_handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
+
+                let stdout = String::from_utf8_lossy(&stdout_bytes);
+                let stderr = String::from_utf8_lossy(&stderr_bytes);
+                let full_output = format!("{}{}", stdout, stderr);
+
+                // Track usage (input = output since no filtering)
+                timer.track(
+                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
+                    &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
+                    &full_output,
+                    &full_output,
+                );
+
+                // Exit with same code as child process
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
                 }
-
-                Ok(captured)
-            });
-
-            let status = child
-                .wait()
-                .context(format!("Failed waiting for command: {}", cmd_name))?;
-
-            let stdout_bytes = stdout_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
-            let stderr_bytes = stderr_handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
-
-            let stdout = String::from_utf8_lossy(&stdout_bytes);
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
-            let full_output = format!("{}{}", stdout, stderr);
-
-            // Track usage (input = output since no filtering)
-            timer.track(
-                &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
-                &full_output,
-                &full_output,
-            );
-
-            // Exit with same code as child process
-            if !status.success() {
-                std::process::exit(status.code().unwrap_or(1));
             }
         }
 
@@ -2138,6 +2251,10 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
+            | Commands::Context { .. }
+            | Commands::Dedup { .. }
+            | Commands::Watch { .. }
+            | Commands::WatchClear
             | Commands::Grep { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
