@@ -229,6 +229,8 @@ rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
 
 rtk session                     # Show RTK adoption across recent sessions
+
+rtk cache-clear                 # Clear the output cache
 ```
 
 ## Global Flags
@@ -354,7 +356,13 @@ exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
 max_files = 20          # rotation limit
+
+[cache]
+enabled = true          # enable output cache (default: false)
+ttl_secs = 300          # cache TTL in seconds (default: 300)
 ```
+
+Cache can also be configured via env vars: `RTK_CACHE=1` to enable, `RTK_CACHE_TTL=<seconds>` to set TTL.
 
 ### Tee: Full Output Recovery
 

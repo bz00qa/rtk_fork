@@ -5,6 +5,15 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+
+### Features
+
+* **cache:** add output cache system with TTL and diff detection
+* **cache-clear:** add command to clear the output cache
+* cache configuration via `[cache]` in `config.toml` or `RTK_CACHE`/`RTK_CACHE_TTL` env vars
+
 ## [0.28.2](https://github.com/rtk-ai/rtk/compare/v0.28.1...v0.28.2) (2026-03-10)
 
 
