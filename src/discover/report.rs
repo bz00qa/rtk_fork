@@ -101,12 +101,13 @@ impl DiscoverReport {
         self.patterns.iter().map(|p| p.occurrences).sum()
     }
 
+    /// Total saveable across all sections (missed + patterns)
     pub fn grand_total_tokens(&self) -> usize {
         self.total_saveable_tokens() + self.total_pattern_tokens()
     }
 }
 
-/// Bold green styled text (TTY-aware)
+/// Bold green styled text (TTY-aware, matches gain.rs style)
 fn styled(text: &str) -> String {
     if !std::io::stdout().is_terminal() {
         return text.to_string();
@@ -145,21 +146,6 @@ fn style_tokens(text: &str) -> String {
     text.bright_white().to_string()
 }
 
-fn pad_right(text: &str, width: usize, styler: fn(&str) -> String) -> String {
-    let padded = format!("{:<width$}", text, width = width);
-    let visible_len = text.len().min(width);
-    let trailing = &padded[visible_len..];
-    format!("{}{}", styler(&padded[..visible_len]), trailing)
-}
-
-fn pad_left(text: &str, width: usize, styler: fn(&str) -> String) -> String {
-    if text.len() >= width {
-        return styler(text);
-    }
-    let padding = width - text.len();
-    format!("{}{}", " ".repeat(padding), styler(text))
-}
-
 /// Format report as text.
 pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> String {
     let mut out = String::with_capacity(2048);
@@ -187,7 +173,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     ));
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
-        out.push_str("\nAll commands are already using RTK. Nothing to report.\n");
+        out.push_str("\nNo missed savings found. RTK usage looks good!\n");
         return out;
     }
 
@@ -265,16 +251,52 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     // Top token consumers
     if !report.consumers.is_empty() {
+        // Compute dynamic column widths for Total and Avg
+        let total_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| format_tokens(c.total_tokens).len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let avg_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| format_tokens(c.avg_tokens).len())
+            .max()
+            .unwrap_or(3)
+            .max(3);
+        // Compute count column width dynamically too
+        let count_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| c.count.to_string().len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let table_w = 4 + 22 + 2 + count_w + 2 + total_w + 2 + avg_w + 3 + 4;
+
         out.push_str(&format!(
             "\n{}\n",
             styled("TOP TOKEN CONSUMERS (by output size)")
         ));
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
         out.push_str(&format!(
-            "  {:<3} {:<22} {:>5}  {:>9} {:>9}   {}\n",
-            "#", "Command", "Count", "Total", "Avg", "RTK?"
+            "  {:<3} {:<22} {:>count_w$}  {:>total_w$}  {:>avg_w$}   {}\n",
+            "#",
+            "Command",
+            "Count",
+            "Total",
+            "Avg",
+            "RTK?",
+            count_w = count_w,
+            total_w = total_w,
+            avg_w = avg_w,
         ));
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
 
         for (i, c) in report.consumers.iter().take(limit).enumerate() {
             let rtk_label = if c.has_rtk_filter {
@@ -285,17 +307,18 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
                 "No".to_string()
             };
             out.push_str(&format!(
-                " {:>2}.  {} {:>5}  {} {}   {}\n",
+                " {:>2}.  {} {:>count_w$}  {}  {}   {}\n",
                 i + 1,
                 pad_right(&truncate_str(&c.command, 22), 22, style_cmd),
                 c.count,
-                pad_left(&format_tokens(c.total_tokens), 9, style_tokens),
-                pad_left(&format_tokens(c.avg_tokens), 9, style_tokens),
+                pad_left(&format_tokens(c.total_tokens), total_w, style_tokens),
+                pad_left(&format_tokens(c.avg_tokens), avg_w, style_tokens),
                 rtk_label,
+                count_w = count_w,
             ));
         }
 
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
 
         let has_unfiltered = report
             .consumers
@@ -303,7 +326,10 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             .take(limit)
             .any(|c| !c.has_rtk_filter);
         if has_unfiltered {
-            out.push_str("  RTK?=No: not yet filtered. Request support:\n  -> github.com/rtk-ai/rtk/issues\n");
+            out.push_str(
+                "  RTK?=No: not yet filtered. Request support:\n  \
+                 -> github.com/rtk-ai/rtk/issues\n",
+            );
         }
     }
 
@@ -338,17 +364,19 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
     }
 
-    // RTK_DISABLED summary
+    // RTK_DISABLED bypass warning
     if report.rtk_disabled_count > 0 {
         out.push_str(&format!(
-            "\nRTK_DISABLED=1 bypasses: {} commands\n",
+            "\nRTK_DISABLED BYPASS -- {} commands ran without filtering\n",
             report.rtk_disabled_count
         ));
+        out.push_str(&"-".repeat(72));
+        out.push('\n');
+        out.push_str("These commands used RTK_DISABLED=1 unnecessarily:\n");
         if !report.rtk_disabled_examples.is_empty() {
-            out.push_str("  Examples: ");
-            out.push_str(&report.rtk_disabled_examples.join(", "));
-            out.push('\n');
+            out.push_str(&format!("  {}\n", report.rtk_disabled_examples.join(", ")));
         }
+        out.push_str("-> Remove RTK_DISABLED=1 to recover token savings\n");
     }
 
     out.push_str("\n~estimated from tool_result output sizes\n");
@@ -392,10 +420,30 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+/// Pad text to `width` (left-aligned) BEFORE applying ANSI styling.
+/// This ensures format alignment is correct regardless of escape sequences.
+fn pad_right(text: &str, width: usize, styler: fn(&str) -> String) -> String {
+    let padded = format!("{:<width$}", text, width = width);
+    // Split into visible content and trailing spaces
+    let visible_len = text.len().min(width);
+    let trailing = &padded[visible_len..];
+    format!("{}{}", styler(&padded[..visible_len]), trailing)
+}
+
+/// Pad text to `width` (right-aligned) BEFORE applying ANSI styling.
+fn pad_left(text: &str, width: usize, styler: fn(&str) -> String) -> String {
+    if text.len() >= width {
+        return styler(text);
+    }
+    let padding = width - text.len();
+    format!("{}{}", " ".repeat(padding), styler(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Identity styler for testing (no ANSI codes)
     fn no_style(s: &str) -> String {
         s.to_string()
     }
@@ -428,12 +476,15 @@ mod tests {
 
     #[test]
     fn test_pad_right_with_ansi_preserves_visual_width() {
+        // Simulate ANSI styling that adds escape codes
         fn fake_ansi(s: &str) -> String {
             format!("\x1b[1;96m{}\x1b[0m", s)
         }
         let result = pad_right("git", 10, fake_ansi);
+        // Should have ANSI around "git" then 7 trailing spaces
         assert!(result.starts_with("\x1b[1;96mgit\x1b[0m"));
         assert!(result.ends_with("       "));
+        // Visual width: 3 (git) + 7 (spaces) = 10
     }
 
     #[test]
@@ -442,11 +493,13 @@ mod tests {
             format!("\x1b[97m{}\x1b[0m", s)
         }
         let result = pad_left("42", 8, fake_ansi);
+        // Should have 6 spaces then ANSI "42"
         assert!(result.starts_with("      \x1b[97m42\x1b[0m"));
     }
 
     #[test]
     fn test_format_text_table_alignment() {
+        // Build a minimal report with varied-length data
         let report = DiscoverReport {
             supported: vec![
                 SupportedEntry {
@@ -480,9 +533,11 @@ mod tests {
             rtk_disabled_examples: vec![],
         };
 
+        // Non-TTY output has no ANSI codes — verify columns align
         let output = format_text(&report, 20, false);
         let lines: Vec<&str> = output.lines().collect();
 
+        // Find header and data rows in MISSED SAVINGS table
         let header_line = lines
             .iter()
             .find(|l| l.contains("Command") && l.contains("Count"))
@@ -496,10 +551,12 @@ mod tests {
             .find(|l| l.contains("cargo test"))
             .expect("cargo test row not found");
 
+        // Verify column alignment by checking "RTK Equivalent" column position
         let header_rtk_pos = header_line.find("RTK Equivalent").unwrap();
         let data1_rtk_pos = data_line_1.find("rtk git").unwrap();
         let data2_rtk_pos = data_line_2.find("rtk cargo").unwrap();
 
+        // RTK Equivalent column should start at same position in all rows
         assert_eq!(
             data1_rtk_pos, data2_rtk_pos,
             "RTK Equivalent column misaligned:\n  '{}'\n  '{}'",
@@ -509,6 +566,82 @@ mod tests {
             header_rtk_pos, data1_rtk_pos,
             "Header vs data RTK column misaligned:\n  '{}'\n  '{}'",
             header_line, data_line_1
+        );
+    }
+
+    #[test]
+    fn test_consumers_table_alignment() {
+        let report = DiscoverReport {
+            supported: vec![],
+            // Need at least one unsupported entry to avoid early return
+            unsupported: vec![UnsupportedEntry {
+                base_command: "dummy".into(),
+                count: 1,
+                example: "dummy".into(),
+            }],
+            patterns: vec![],
+            consumers: vec![
+                TokenConsumer {
+                    command: "git diff".into(),
+                    count: 99,
+                    total_tokens: 121600,
+                    avg_tokens: 1228,
+                    has_rtk_filter: true,
+                },
+                TokenConsumer {
+                    command: "cargo test".into(),
+                    count: 91,
+                    total_tokens: 59100,
+                    avg_tokens: 649,
+                    has_rtk_filter: true,
+                },
+                TokenConsumer {
+                    command: "grep -n".into(),
+                    count: 73,
+                    total_tokens: 5300,
+                    avg_tokens: 72,
+                    has_rtk_filter: true,
+                },
+            ],
+            total_commands: 263,
+            sessions_scanned: 10,
+            already_rtk: 0,
+            since_days: 30,
+            parse_errors: 0,
+            rtk_disabled_count: 0,
+            rtk_disabled_examples: vec![],
+        };
+
+        let output = format_text(&report, 20, false);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Find header and data lines in TOP TOKEN CONSUMERS
+        let header = lines
+            .iter()
+            .find(|l| l.contains("Command") && l.contains("Total") && l.contains("Avg"))
+            .expect("consumers header not found");
+        let row1 = lines
+            .iter()
+            .find(|l| l.contains("git diff"))
+            .expect("git diff row not found");
+        let row3 = lines
+            .iter()
+            .find(|l| l.contains("grep -n"))
+            .expect("grep row not found");
+
+        // RTK? column should align
+        let header_rtk = header.find("RTK?").unwrap();
+        let row1_rtk = row1.find("Yes").unwrap();
+        let row3_rtk = row3.find("Yes").unwrap();
+        assert_eq!(
+            row1_rtk, row3_rtk,
+            "RTK? column misaligned between rows:\n  '{}'\n  '{}'",
+            row1, row3
+        );
+        assert_eq!(
+            header_rtk, row1_rtk,
+            "RTK? header vs data misaligned:\n  '{}'\n  '{}'",
+            header, row1
         );
     }
 }

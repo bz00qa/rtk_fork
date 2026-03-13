@@ -86,6 +86,7 @@ pub fn run(
 
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
+
             // Find the last non-ignored part — that's the command that actually
             // produced the output. In chains like `PATH=... && cd dir && npm build`,
             // only `npm build` should get output_len attributed.
@@ -317,7 +318,7 @@ fn detect_patterns(
 ) -> Vec<PatternOpportunity> {
     let mut context_count = 0usize;
     let mut watch_candidates: HashMap<String, usize> = HashMap::new();
-    let mut dedup_candidates: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut dedup_candidates: HashMap<String, (usize, usize)> = HashMap::new(); // cmd -> (count, total_output)
 
     for session_path in sessions {
         let extracted = match provider.extract_commands(session_path) {
@@ -325,6 +326,7 @@ fn detect_patterns(
             Err(_) => continue,
         };
 
+        // Sort by sequence index
         let mut cmds = extracted;
         cmds.sort_by_key(|c| c.sequence_index);
 
@@ -347,6 +349,7 @@ fn detect_patterns(
             })
             .collect();
 
+        // Count windows of 3 where we see status+diff+log
         for window in git_cmds.windows(3) {
             let has_status = window.iter().any(|c| c.contains("status"));
             let has_diff = window.iter().any(|c| c.contains("diff"));
@@ -386,6 +389,7 @@ fn detect_patterns(
     let mut patterns = Vec::new();
 
     if context_count > 0 {
+        // Estimate: each context pattern saves ~3 round-trips × ~200 tokens overhead
         patterns.push(PatternOpportunity {
             pattern: "git status + diff + log sequence".to_string(),
             suggestion: "rtk context".to_string(),
@@ -394,10 +398,12 @@ fn detect_patterns(
         });
     }
 
+    // Top watch candidates
     let mut watch_vec: Vec<_> = watch_candidates.into_iter().collect();
     watch_vec.sort_by(|a, b| b.1.cmp(&a.1));
     for (cmd, count) in watch_vec.into_iter().take(5) {
-        let est_savings = (count - count / 3) * 150;
+        // Estimate: repeated runs with identical output → 90% savings on 2nd+ runs
+        let est_savings = (count - count / 3) * 150; // ~150 tokens per avoided repeat
         patterns.push(PatternOpportunity {
             pattern: format!("{} repeated", cmd),
             suggestion: format!("rtk watch {}", cmd),
@@ -406,11 +412,13 @@ fn detect_patterns(
         });
     }
 
+    // Top dedup candidates
     let mut dedup_vec: Vec<_> = dedup_candidates.into_iter().collect();
     dedup_vec.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
     for (cmd, (count, total_bytes)) in dedup_vec.into_iter().take(5) {
         if count >= 2 {
-            let est_savings = total_bytes / 4 * 30 / 100;
+            // Estimate: dedup saves ~30% of large outputs
+            let est_savings = total_bytes / 4 * 30 / 100; // bytes→tokens × 30%
             patterns.push(PatternOpportunity {
                 pattern: format!("{} (large output)", cmd),
                 suggestion: format!("rtk dedup {}", cmd),
@@ -435,15 +443,20 @@ const PATTERN_SKIP_PREFIXES: &[&str] = &[
 ];
 
 /// Normalize a command to its base form for comparison.
+/// "cargo test -- --nocapture" → "cargo test"
+/// "rtk cargo test" → "cargo test"
+/// Returns None for commands not meaningful for pattern detection.
 fn normalize_cmd_base(cmd: &str) -> Option<String> {
     let trimmed = cmd.trim();
 
+    // Skip non-meaningful commands
     for prefix in PATTERN_SKIP_PREFIXES {
         if trimmed.starts_with(prefix) {
             return None;
         }
     }
 
+    // Skip pure env assignments
     if trimmed.contains('=') && !trimmed.contains(' ') {
         return None;
     }
@@ -458,6 +471,14 @@ fn normalize_cmd_base(cmd: &str) -> Option<String> {
 }
 
 /// Extract a smart base key for top-token-consumer grouping.
+///
+/// Handles special patterns:
+/// - `python -m pytest ...` → `python -m pytest` (3 words, not 2)
+/// - `python3 -m mypy ...`  → `python3 -m mypy`
+/// - `pnpm --filter X cmd`  → `pnpm cmd` (skip --filter + its arg)
+/// - `pnpm -r build`        → `pnpm build` (skip -r flag)
+/// - `npm run build`        → `npm run` (standard 2-word)
+/// - `go test ./...`        → `go test` (standard 2-word)
 fn consumer_base(cmd: &str) -> String {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     if words.is_empty() {
@@ -469,20 +490,20 @@ fn consumer_base(cmd: &str) -> String {
         return format!("{} -m {}", words[0], words[2]);
     }
 
-    // pnpm with flags before the subcommand
+    // pnpm with flags before the subcommand: skip --filter/F + arg, -r/-w/etc
     if words[0] == "pnpm" && words.len() >= 2 {
         let mut i = 1;
         while i < words.len() {
             if (words[i] == "--filter" || words[i] == "-F") && i + 1 < words.len() {
-                i += 2;
+                i += 2; // skip flag + its argument
             } else if words[i].starts_with("--filter=") || words[i].starts_with("-F") {
-                i += 1;
+                i += 1; // skip combined flag=value
             } else if words[i] == "-r"
                 || words[i] == "--recursive"
                 || words[i] == "-w"
                 || words[i] == "--workspace-root"
             {
-                i += 1;
+                i += 1; // skip standalone flags
             } else {
                 break;
             }
@@ -491,6 +512,26 @@ fn consumer_base(cmd: &str) -> String {
             return format!("pnpm {}", words[i]);
         }
         return "pnpm".to_string();
+    }
+
+    // Commands where the second word is a path/file argument, not a subcommand.
+    // Group by command name only (optionally with flags).
+    const ARG_COMMANDS: &[&str] = &[
+        "cat", "head", "tail", "wc", "less", "more", "touch", "rm", "cp", "mv", "mkdir", "chmod",
+        "chown", "file", "stat", "du", "df", "sort", "uniq", "cut", "tr", "tee", "xargs",
+    ];
+    if ARG_COMMANDS.contains(&words[0]) {
+        return words[0].to_string();
+    }
+
+    // grep/find/ls: keep first flag if present (e.g. "grep -n", "find .", "ls -la")
+    const FLAG_COMMANDS: &[&str] = &["grep", "find", "ls"];
+    if FLAG_COMMANDS.contains(&words[0]) && words.len() >= 2 {
+        // Keep first flag (-n, -la, etc.) but not path arguments
+        if words[1].starts_with('-') {
+            return format!("{} {}", words[0], words[1]);
+        }
+        return words[0].to_string();
     }
 
     // Default: first 2 words
