@@ -34,13 +34,10 @@ const COMMAND_REGISTRY: &[(&str, &str)] = &[
     ("ruff", "Languages"),
     ("mypy", "Languages"),
     ("pip", "Languages"),
-    ("deno", "Languages"),
     // Package Managers
     ("pnpm", "Package Managers"),
     ("npm", "Package Managers"),
     ("npx", "Package Managers"),
-    ("bun", "Package Managers"),
-    ("bunx", "Package Managers"),
     ("prisma", "Package Managers"),
     // Files & Search
     ("ls", "Files & Search"),
@@ -66,9 +63,6 @@ const COMMAND_REGISTRY: &[(&str, &str)] = &[
     ("curl", "Infrastructure"),
     ("wget", "Infrastructure"),
     // Meta Commands
-    ("context", "Meta Commands"),
-    ("dedup", "Meta Commands"),
-    ("watch", "Meta Commands"),
     ("proxy", "Meta Commands"),
 ];
 

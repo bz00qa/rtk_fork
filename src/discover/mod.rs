@@ -11,7 +11,7 @@ use registry::{
     category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
 };
-use report::{DiscoverReport, PatternOpportunity, SupportedEntry, TokenConsumer, UnsupportedEntry};
+use report::{DiscoverReport, SupportedEntry, TokenConsumer, UnsupportedEntry};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -196,9 +196,6 @@ pub fn run(
         }
     }
 
-    // Detect patterns across sessions
-    let patterns = detect_patterns(&sessions, &provider, verbose);
-
     // Build report
     let mut supported: Vec<SupportedEntry> = supported_map
         .into_values()
@@ -305,7 +302,6 @@ pub fn run(
         since_days,
         supported,
         unsupported,
-        patterns,
         consumers,
         parse_errors,
         rtk_disabled_count,
@@ -318,171 +314,6 @@ pub fn run(
     }
 
     Ok(())
-}
-
-/// Detect usage patterns that could benefit from RTK meta-commands.
-///
-/// Patterns detected:
-/// 1. Sequential git status+diff+log → rtk context
-/// 2. Same command repeated 3+ times → rtk watch
-/// 3. Commands with large output (>2K chars) → rtk dedup
-fn detect_patterns(
-    sessions: &[std::path::PathBuf],
-    provider: &ClaudeProvider,
-    verbose: u8,
-) -> Vec<PatternOpportunity> {
-    let mut context_count = 0usize;
-    let mut watch_candidates: HashMap<String, usize> = HashMap::new();
-    let mut dedup_candidates: HashMap<String, (usize, usize)> = HashMap::new(); // cmd -> (count, total_output)
-
-    for session_path in sessions {
-        let extracted = match provider.extract_commands(session_path) {
-            Ok(cmds) => cmds,
-            Err(_) => continue,
-        };
-
-        // Sort by sequence index
-        let mut cmds = extracted;
-        cmds.sort_by_key(|c| c.sequence_index);
-
-        // Detect context pattern: git status near git diff near git log
-        let git_cmds: Vec<&str> = cmds
-            .iter()
-            .filter_map(|c| {
-                let t = c.command.trim();
-                if t.starts_with("git status")
-                    || t.starts_with("rtk git status")
-                    || t.starts_with("git diff")
-                    || t.starts_with("rtk git diff")
-                    || t.starts_with("git log")
-                    || t.starts_with("rtk git log")
-                {
-                    Some(t)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Count windows of 3 where we see status+diff+log
-        for window in git_cmds.windows(3) {
-            let has_status = window.iter().any(|c| c.contains("status"));
-            let has_diff = window.iter().any(|c| c.contains("diff"));
-            let has_log = window.iter().any(|c| c.contains("log"));
-            if has_status && has_diff && has_log {
-                context_count += 1;
-            }
-        }
-
-        // Detect watch pattern: same command base repeated
-        let mut cmd_runs: HashMap<String, usize> = HashMap::new();
-        for cmd in &cmds {
-            if let Some(base) = normalize_cmd_base(&cmd.command) {
-                *cmd_runs.entry(base).or_insert(0) += 1;
-            }
-        }
-        for (base, count) in cmd_runs {
-            if count >= 3 {
-                *watch_candidates.entry(base).or_insert(0) += count;
-            }
-        }
-
-        // Detect dedup pattern: commands with large output
-        for cmd in &cmds {
-            if let Some(len) = cmd.output_len {
-                if len > 2000 {
-                    if let Some(base) = normalize_cmd_base(&cmd.command) {
-                        let entry = dedup_candidates.entry(base).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 += len;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut patterns = Vec::new();
-
-    if context_count > 0 {
-        // Estimate: each context pattern saves ~3 round-trips × ~200 tokens overhead
-        patterns.push(PatternOpportunity {
-            pattern: "git status + diff + log sequence".to_string(),
-            suggestion: "rtk context".to_string(),
-            occurrences: context_count,
-            estimated_savings_tokens: context_count * 600,
-        });
-    }
-
-    // Top watch candidates
-    let mut watch_vec: Vec<_> = watch_candidates.into_iter().collect();
-    watch_vec.sort_by(|a, b| b.1.cmp(&a.1));
-    for (cmd, count) in watch_vec.into_iter().take(5) {
-        // Estimate: repeated runs with identical output → 90% savings on 2nd+ runs
-        let est_savings = (count - count / 3) * 150; // ~150 tokens per avoided repeat
-        patterns.push(PatternOpportunity {
-            pattern: format!("{} repeated", cmd),
-            suggestion: format!("rtk watch {}", cmd),
-            occurrences: count,
-            estimated_savings_tokens: est_savings,
-        });
-    }
-
-    // Top dedup candidates
-    let mut dedup_vec: Vec<_> = dedup_candidates.into_iter().collect();
-    dedup_vec.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
-    for (cmd, (count, total_bytes)) in dedup_vec.into_iter().take(5) {
-        if count >= 2 {
-            // Estimate: dedup saves ~30% of large outputs
-            let est_savings = total_bytes / 4 * 30 / 100; // bytes→tokens × 30%
-            patterns.push(PatternOpportunity {
-                pattern: format!("{} (large output)", cmd),
-                suggestion: format!("rtk dedup {}", cmd),
-                occurrences: count,
-                estimated_savings_tokens: est_savings,
-            });
-        }
-    }
-
-    if verbose > 0 && !patterns.is_empty() {
-        eprintln!("Detected {} usage patterns", patterns.len());
-    }
-
-    patterns
-}
-
-/// Commands not meaningful for watch/dedup pattern detection
-const PATTERN_SKIP_PREFIXES: &[&str] = &[
-    "cd ", "cd\t", "ls", "echo ", "cat ", "pwd", "mkdir ", "rm ", "cp ", "mv ", "touch ", "chmod ",
-    "export ", "source ", ".", "PATH=", "SKIP_ENV", "set ", "unset ", "head ", "tail ", "wc ",
-    "which ", "where ", "type ",
-];
-
-/// Normalize a command to its base form for comparison.
-/// "cargo test -- --nocapture" → "cargo test"
-/// "rtk cargo test" → "cargo test"
-/// Returns None for commands not meaningful for pattern detection.
-fn normalize_cmd_base(cmd: &str) -> Option<String> {
-    let trimmed = cmd.trim();
-
-    // Skip non-meaningful commands
-    for prefix in PATTERN_SKIP_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            return None;
-        }
-    }
-
-    // Skip pure env assignments
-    if trimmed.contains('=') && !trimmed.contains(' ') {
-        return None;
-    }
-
-    let stripped = trimmed.strip_prefix("rtk ").unwrap_or(trimmed);
-    let parts: Vec<&str> = stripped.splitn(3, char::is_whitespace).collect();
-    match parts.len() {
-        0 => None,
-        1 => Some(parts[0].to_string()),
-        _ => Some(format!("{} {}", parts[0], parts[1])),
-    }
 }
 
 /// Extract a smart base key for top-token-consumer grouping.
@@ -576,5 +407,142 @@ fn truncate_command(cmd: &str) -> String {
         0 => String::new(),
         1 => parts[0].to_string(),
         _ => format!("{} {}", parts[0], parts[1]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- consumer_base() tests ---
+
+    #[test]
+    fn test_consumer_base_empty() {
+        assert_eq!(consumer_base(""), "");
+    }
+
+    #[test]
+    fn test_consumer_base_single_word() {
+        assert_eq!(consumer_base("htop"), "htop");
+    }
+
+    #[test]
+    fn test_consumer_base_two_words() {
+        assert_eq!(consumer_base("git status"), "git status");
+    }
+
+    #[test]
+    fn test_consumer_base_three_words_truncated() {
+        assert_eq!(consumer_base("go test ./..."), "go test");
+    }
+
+    #[test]
+    fn test_consumer_base_python_m_module() {
+        assert_eq!(consumer_base("python -m pytest foo"), "python -m pytest");
+        assert_eq!(consumer_base("python3 -m mypy src/"), "python3 -m mypy");
+    }
+
+    #[test]
+    fn test_consumer_base_python_m_short() {
+        // Only 2 words: "python -m" — not enough for 3-word form, falls to default
+        assert_eq!(consumer_base("python -m"), "python -m");
+    }
+
+    #[test]
+    fn test_consumer_base_pnpm_filter_skip() {
+        assert_eq!(consumer_base("pnpm --filter @app/web build"), "pnpm build");
+        assert_eq!(consumer_base("pnpm -F @app/api test"), "pnpm test");
+    }
+
+    #[test]
+    fn test_consumer_base_pnpm_recursive_skip() {
+        assert_eq!(consumer_base("pnpm -r build"), "pnpm build");
+        assert_eq!(consumer_base("pnpm --recursive build"), "pnpm build");
+        assert_eq!(consumer_base("pnpm -w install"), "pnpm install");
+        assert_eq!(
+            consumer_base("pnpm --workspace-root install"),
+            "pnpm install"
+        );
+    }
+
+    #[test]
+    fn test_consumer_base_pnpm_filter_combined() {
+        // --filter=value form
+        assert_eq!(consumer_base("pnpm --filter=@app/web build"), "pnpm build");
+    }
+
+    #[test]
+    fn test_consumer_base_pnpm_only_flags() {
+        // All flags, no subcommand — falls back to "pnpm"
+        assert_eq!(consumer_base("pnpm -r"), "pnpm");
+    }
+
+    #[test]
+    fn test_consumer_base_arg_commands() {
+        // cat/head/tail etc. group by command name only
+        assert_eq!(consumer_base("cat foo.txt"), "cat");
+        assert_eq!(consumer_base("head -20 file.rs"), "head");
+        assert_eq!(consumer_base("wc -l src/main.rs"), "wc");
+        assert_eq!(consumer_base("sort output.txt"), "sort");
+    }
+
+    #[test]
+    fn test_consumer_base_flag_commands() {
+        // grep/find/ls keep first flag if present
+        assert_eq!(consumer_base("grep -n pattern"), "grep -n");
+        assert_eq!(consumer_base("find . -name"), "find");
+        assert_eq!(consumer_base("ls -la"), "ls -la");
+        // No flag — just command name
+        assert_eq!(consumer_base("grep pattern"), "grep");
+        assert_eq!(consumer_base("ls src/"), "ls");
+    }
+
+    // --- effective_idx tests ---
+
+    #[test]
+    fn test_effective_idx_single_command() {
+        let parts = ["git status"];
+        let idx = parts
+            .iter()
+            .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn test_effective_idx_chain_with_cd_prefix() {
+        let parts = ["cd /some/dir", "npm run build"];
+        let idx = parts
+            .iter()
+            .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn test_effective_idx_all_ignored() {
+        let parts = ["cd /tmp", "echo hello", "pwd"];
+        let idx = parts
+            .iter()
+            .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn test_effective_idx_env_chain() {
+        // PATH=... is a pure assignment (Ignored), npm run build is Supported
+        let parts = [r#"PATH="/c/Program Files/nodejs:$PATH""#, "npm run build"];
+        let idx = parts
+            .iter()
+            .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn test_effective_idx_last_non_ignored() {
+        // Multiple supported commands — picks LAST one (rposition)
+        let parts = ["git status", "cargo test"];
+        let idx = parts
+            .iter()
+            .rposition(|p| !matches!(classify_command(p), Classification::Ignored));
+        assert_eq!(idx, Some(1));
     }
 }

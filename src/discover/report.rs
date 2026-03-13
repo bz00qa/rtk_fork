@@ -43,15 +43,6 @@ pub struct UnsupportedEntry {
     pub example: String,
 }
 
-/// A detected usage pattern that could benefit from RTK meta-commands.
-#[derive(Debug, Serialize)]
-pub struct PatternOpportunity {
-    pub pattern: String,
-    pub suggestion: String,
-    pub occurrences: usize,
-    pub estimated_savings_tokens: usize,
-}
-
 /// RTK handling level for a token consumer.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum RtkHandling {
@@ -82,7 +73,6 @@ pub struct DiscoverReport {
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
-    pub patterns: Vec<PatternOpportunity>,
     pub consumers: Vec<TokenConsumer>,
     pub parse_errors: usize,
     pub rtk_disabled_count: usize,
@@ -101,20 +91,9 @@ impl DiscoverReport {
         self.supported.iter().map(|s| s.count).sum()
     }
 
-    pub fn total_pattern_tokens(&self) -> usize {
-        self.patterns
-            .iter()
-            .map(|p| p.estimated_savings_tokens)
-            .sum()
-    }
-
-    pub fn total_pattern_occurrences(&self) -> usize {
-        self.patterns.iter().map(|p| p.occurrences).sum()
-    }
-
-    /// Total saveable across all sections (missed + patterns)
+    /// Total saveable tokens across all supported commands.
     pub fn grand_total_tokens(&self) -> usize {
-        self.total_saveable_tokens() + self.total_pattern_tokens()
+        self.total_saveable_tokens()
     }
 }
 
@@ -223,38 +202,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         ));
     }
 
-    // Pattern opportunities
-    if !report.patterns.is_empty() {
-        out.push_str(&format!(
-            "\n{}\n",
-            styled("PATTERN OPPORTUNITIES -- use RTK meta-commands")
-        ));
-        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
-
-        for p in &report.patterns {
-            out.push_str(&format!(
-                "  {} ({}x) \u{2192} {}\n    Est. savings: ~{}\n",
-                style_cmd(&p.pattern),
-                p.occurrences,
-                style_cmd(&p.suggestion),
-                style_tokens(&format_tokens(p.estimated_savings_tokens)),
-            ));
-        }
-
-        out.push_str(&format!("{}\n", styled(&"-".repeat(72))));
-        out.push_str(&format!(
-            "Total: {} patterns, {} occurrences -> ~{} saveable\n",
-            style_tokens(&report.patterns.len().to_string()),
-            style_tokens(&report.total_pattern_occurrences().to_string()),
-            style_tokens(&format_tokens(report.total_pattern_tokens())),
-        ));
-    }
-
     // Grand total
     let grand = report.grand_total_tokens();
     if grand > 0 {
         out.push_str(&format!(
-            "\n{}: ~{} (missed + patterns)\n",
+            "\n{}: ~{}\n",
             styled("TOTAL SAVEABLE"),
             style_tokens(&format_tokens(grand)),
         ));
@@ -544,7 +496,7 @@ mod tests {
             ],
             unsupported: vec![],
             consumers: vec![],
-            patterns: vec![],
+
             total_commands: 100,
             sessions_scanned: 5,
             already_rtk: 0,
@@ -600,7 +552,7 @@ mod tests {
                 count: 1,
                 example: "dummy".into(),
             }],
-            patterns: vec![],
+
             consumers: vec![
                 TokenConsumer {
                     command: "git diff".into(),

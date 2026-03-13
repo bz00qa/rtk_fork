@@ -5,6 +5,26 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+* **discover:** add RtkHandling classification (Filtered/Passthrough/None) to token consumers ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** add token consumer table ranking commands by output token usage ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** add `consumer_base()` to extract base command from complex invocations (python -m, pnpm --filter, etc.) ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** add `effective_idx` logic to skip cd/env prefixes when classifying chained commands ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **gain:** add command coverage table grouped by category (Git & VCS, JS/TS, Python, etc.) ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **gain:** add routing breakdown summary (dedicated/proxy/unknown counts) ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **gain:** add COMMAND_REGISTRY with `lookup_category()` for command-to-category mapping ([#550](https://github.com/rtk-ai/rtk/issues/550))
+
+### Improvements
+
+* **discover:** improved ENV_PREFIX regex to handle quoted env values (`KEY="val with spaces"`) ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** add PURE_ASSIGNMENT detection to ignore bare `KEY=val` lines ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** strip leading `&&`, `||`, `;` operators before classifying commands ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **discover:** classify redirects (`>`, `>>`, `|`) as Ignored instead of Unsupported ([#550](https://github.com/rtk-ai/rtk/issues/550))
+* **tracking:** add `get_by_command_all()` query for command coverage reporting ([#550](https://github.com/rtk-ai/rtk/issues/550))
+
 ## [0.28.2](https://github.com/rtk-ai/rtk/compare/v0.28.1...v0.28.2) (2026-03-10)
 
 

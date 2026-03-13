@@ -545,11 +545,7 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
             }
             rtk_equivalent
         }
-        Classification::Unsupported { .. } => {
-            // Unknown command: route through proxy --filter for auto noise reduction
-            return Some(format!("rtk proxy -f {}", trimmed));
-        }
-        Classification::Ignored => return None,
+        _ => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
@@ -581,50 +577,16 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
-            let cleaned_rest = strip_verbose_flags(rest, rule.rtk_cmd);
-            let rewritten = if cleaned_rest.is_empty() {
+            let rewritten = if rest.is_empty() {
                 format!("{}{}", env_prefix, rule.rtk_cmd)
             } else {
-                format!("{}{} {}", env_prefix, rule.rtk_cmd, cleaned_rest)
+                format!("{}{} {}", env_prefix, rule.rtk_cmd, rest)
             };
             return Some(rewritten);
         }
     }
 
     None
-}
-
-/// Commands where `-v` does NOT mean "verbose" and should not be stripped.
-/// For these commands, `-v` typically means "invert match".
-const VERBOSE_FLAG_DENYLIST: &[&str] = &["rtk grep"];
-
-/// Strip verbose flags from command args to reduce token-heavy output.
-///
-/// Removes `-v`, `-vv`, `-vvv`, `--verbose`, and `--debug` as standalone tokens.
-/// Skips stripping for commands in `VERBOSE_FLAG_DENYLIST` where `-v` has
-/// different semantics (e.g., `grep -v` = invert match).
-fn strip_verbose_flags(args: &str, rtk_cmd: &str) -> String {
-    if args.is_empty() {
-        return String::new();
-    }
-
-    // Don't strip for commands where -v means something else
-    if VERBOSE_FLAG_DENYLIST.contains(&rtk_cmd) {
-        return args.to_string();
-    }
-
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    let filtered: Vec<&str> = tokens
-        .into_iter()
-        .filter(|token| {
-            !matches!(
-                *token,
-                "-v" | "-vv" | "-vvv" | "-vvvv" | "--verbose" | "--debug"
-            )
-        })
-        .collect();
-
-    filtered.join(" ")
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1067,7 +1029,7 @@ mod tests {
     fn test_rewrite_background_unsupported_right() {
         assert_eq!(
             rewrite_command("cargo test & htop", &[]),
-            Some("rtk cargo test & rtk proxy -f htop".into())
+            Some("rtk cargo test & htop".into())
         );
     }
 
@@ -1081,11 +1043,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_unsupported_gets_proxy_filter() {
-        assert_eq!(
-            rewrite_command("htop", &[]),
-            Some("rtk proxy -f htop".into())
-        );
+    fn test_rewrite_unsupported_returns_none() {
+        assert_eq!(rewrite_command("htop", &[]), None);
     }
 
     #[test]
@@ -1513,26 +1472,20 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_docker_compose_up_proxy_filtered() {
-        assert_eq!(
-            rewrite_command("docker compose up -d", &[]),
-            Some("rtk proxy -f docker compose up -d".into())
-        );
+    fn test_rewrite_docker_compose_up_skipped() {
+        assert_eq!(rewrite_command("docker compose up -d", &[]), None);
     }
 
     #[test]
-    fn test_rewrite_docker_compose_down_proxy_filtered() {
-        assert_eq!(
-            rewrite_command("docker compose down", &[]),
-            Some("rtk proxy -f docker compose down".into())
-        );
+    fn test_rewrite_docker_compose_down_skipped() {
+        assert_eq!(rewrite_command("docker compose down", &[]), None);
     }
 
     #[test]
-    fn test_rewrite_docker_compose_config_proxy_filtered() {
+    fn test_rewrite_docker_compose_config_skipped() {
         assert_eq!(
             rewrite_command("docker compose -f foo.yaml config --services", &[]),
-            Some("rtk proxy -f docker compose -f foo.yaml config --services".into())
+            None
         );
     }
 
@@ -1924,20 +1877,17 @@ mod tests {
 
     #[test]
     fn test_rewrite_compound_mixed_supported_unsupported() {
-        // unsupported segments get proxy --filter
+        // unsupported segments stay raw
         assert_eq!(
             rewrite_command("cargo test && htop", &[]),
-            Some("rtk cargo test && rtk proxy -f htop".into())
+            Some("rtk cargo test && htop".into())
         );
     }
 
     #[test]
-    fn test_rewrite_compound_all_unsupported_gets_proxy() {
-        // All unsupported → all get proxy --filter
-        assert_eq!(
-            rewrite_command("htop && top", &[]),
-            Some("rtk proxy -f htop && rtk proxy -f top".into())
-        );
+    fn test_rewrite_compound_all_unsupported_returns_none() {
+        // No rewrite at all: returns None
+        assert_eq!(rewrite_command("htop && top", &[]), None);
     }
 
     // --- sudo / env prefix + rewrite ---
@@ -2089,6 +2039,33 @@ mod tests {
         );
     }
 
+    // --- #508: RTK_DISABLED detection helpers ---
+
+    #[test]
+    fn test_has_rtk_disabled_prefix() {
+        assert!(has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(has_rtk_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"));
+        assert!(has_rtk_disabled_prefix(
+            "RTK_DISABLED=true git log --oneline"
+        ));
+        assert!(!has_rtk_disabled_prefix("git status"));
+        assert!(!has_rtk_disabled_prefix("rtk git status"));
+        assert!(!has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix() {
+        assert_eq!(
+            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            "git status"
+        );
+        assert_eq!(
+            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            "cargo test"
+        );
+        assert_eq!(strip_disabled_prefix("git status"), "git status");
+    }
+
     // --- Discover optimization: PATH quoted env prefix ---
 
     #[test]
@@ -2152,231 +2129,6 @@ mod tests {
         );
     }
 
-    // --- Git extended subcommands ---
-
-    #[test]
-    fn test_classify_git_checkout() {
-        assert!(matches!(
-            classify_command("git checkout main"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_git_ls_files() {
-        assert!(matches!(
-            classify_command("git ls-files"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_git_rev_parse() {
-        assert!(matches!(
-            classify_command("git rev-parse HEAD"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_git_check_ignore() {
-        assert!(matches!(
-            classify_command("git check-ignore -v file.txt"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_git_dash_c() {
-        assert!(matches!(
-            classify_command("git -C /some/dir status"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                ..
-            }
-        ));
-    }
-
-    // --- pnpm extended subcommands ---
-
-    #[test]
-    fn test_classify_pnpm_filter() {
-        assert!(matches!(
-            classify_command("pnpm --filter @app/web build"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_build() {
-        assert!(matches!(
-            classify_command("pnpm build"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_exec() {
-        assert!(matches!(
-            classify_command("pnpm exec tsc"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_run() {
-        assert!(matches!(
-            classify_command("pnpm run dev"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_typecheck() {
-        assert!(matches!(
-            classify_command("pnpm typecheck"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_dash_f() {
-        assert!(matches!(
-            classify_command("pnpm -F @app/api test"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_recursive() {
-        assert!(matches!(
-            classify_command("pnpm -r build"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_pnpm_recursive_long() {
-        assert!(matches!(
-            classify_command("pnpm --recursive build"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                ..
-            }
-        ));
-    }
-
-    // --- npm extended subcommands ---
-
-    #[test]
-    fn test_classify_npm_test() {
-        assert!(matches!(
-            classify_command("npm test"),
-            Classification::Supported {
-                rtk_equivalent: "rtk npm",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_npm_install() {
-        assert!(matches!(
-            classify_command("npm install express"),
-            Classification::Supported {
-                rtk_equivalent: "rtk npm",
-                ..
-            }
-        ));
-    }
-
-    // --- Go extended subcommands ---
-
-    #[test]
-    fn test_classify_go_mod() {
-        assert!(matches!(
-            classify_command("go mod tidy"),
-            Classification::Supported {
-                rtk_equivalent: "rtk go",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_go_tool() {
-        assert!(matches!(
-            classify_command("go tool cover"),
-            Classification::Supported {
-                rtk_equivalent: "rtk go",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_go_doc() {
-        assert!(matches!(
-            classify_command("go doc fmt.Println"),
-            Classification::Supported {
-                rtk_equivalent: "rtk go",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_go_list() {
-        assert!(matches!(
-            classify_command("go list ./..."),
-            Classification::Supported {
-                rtk_equivalent: "rtk go",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
     // --- Leading operator stripping ---
 
     #[test]
@@ -2410,232 +2162,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    // --- Ignored commands ---
-
-    #[test]
-    fn test_classify_tasklist_ignored() {
-        assert_eq!(classify_command("tasklist"), Classification::Ignored);
-    }
-
-    #[test]
-    fn test_classify_timeout_ignored() {
-        assert_eq!(classify_command("timeout /t 5"), Classification::Ignored);
-    }
-
-    #[test]
-    fn test_classify_dot_bin_ignored() {
-        assert_eq!(
-            classify_command("./bin/my-tool --flag"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_venv_python_ignored() {
-        assert_eq!(
-            classify_command(".venv/bin/python script.py"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_python_script_ignored() {
-        assert_eq!(
-            classify_command("python ./my_script.py"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_env_exact_ignored() {
-        assert_eq!(classify_command("env"), Classification::Ignored);
-    }
-
-    #[test]
-    fn test_classify_printenv_exact_ignored() {
-        assert_eq!(classify_command("printenv"), Classification::Ignored);
-    }
-
-    // --- Cargo extended subcommands ---
-
-    #[test]
-    fn test_classify_go_version_ignored() {
-        assert_eq!(classify_command("go version"), Classification::Ignored);
-    }
-
-    #[test]
-    fn test_classify_taskkill_uppercase_ignored() {
-        assert_eq!(
-            classify_command("TASKKILL //F //IM server.exe"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_pnpm_store() {
-        assert!(matches!(
-            classify_command("pnpm store prune"),
-            Classification::Supported {
-                rtk_equivalent: "rtk pnpm",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_npm_root_ignored() {
-        assert_eq!(classify_command("npm root -g"), Classification::Ignored);
-    }
-
-    #[test]
-    fn test_classify_node_check_ignored() {
-        assert_eq!(
-            classify_command("node --check src/main.js"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_python_version_ignored() {
-        assert_eq!(
-            classify_command("python --version 2>/dev/null"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_rustc_ignored() {
-        assert_eq!(
-            classify_command("rustc --explain E0255"),
-            Classification::Ignored
-        );
-    }
-
-    #[test]
-    fn test_classify_cargo_tree() {
-        assert!(matches!(
-            classify_command("cargo tree"),
-            Classification::Supported {
-                rtk_equivalent: "rtk cargo",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_classify_cargo_doc() {
-        assert!(matches!(
-            classify_command("cargo doc --open"),
-            Classification::Supported {
-                rtk_equivalent: "rtk cargo",
-                status: RtkStatus::Passthrough,
-                ..
-            }
-        ));
-    }
-
-    // --- Verbose flag stripping ---
-
-    #[test]
-    fn test_strip_verbose_v_from_cargo_test() {
-        assert_eq!(strip_verbose_flags("-v", "rtk cargo"), "");
-    }
-
-    #[test]
-    fn test_strip_verbose_vv_from_git_log() {
-        assert_eq!(strip_verbose_flags("-vv --oneline", "rtk git"), "--oneline");
-    }
-
-    #[test]
-    fn test_strip_verbose_long_flag() {
-        assert_eq!(
-            strip_verbose_flags("--verbose --cached", "rtk git"),
-            "--cached"
-        );
-    }
-
-    #[test]
-    fn test_strip_debug_flag() {
-        assert_eq!(
-            strip_verbose_flags("--debug test_name", "rtk cargo"),
-            "test_name"
-        );
-    }
-
-    #[test]
-    fn test_strip_verbose_preserves_grep_v() {
-        // grep -v means "invert match", NOT verbose — must not strip
-        assert_eq!(
-            strip_verbose_flags("-v pattern file.rs", "rtk grep"),
-            "-v pattern file.rs"
-        );
-    }
-
-    #[test]
-    fn test_strip_verbose_empty_args() {
-        assert_eq!(strip_verbose_flags("", "rtk git"), "");
-    }
-
-    #[test]
-    fn test_strip_verbose_no_flags_passthrough() {
-        assert_eq!(
-            strip_verbose_flags("status --short", "rtk git"),
-            "status --short"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_strips_verbose_from_cargo() {
-        assert_eq!(
-            rewrite_command("cargo test -v", &[]),
-            Some("rtk cargo test".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_strips_verbose_from_git_log() {
-        assert_eq!(
-            rewrite_command("git log --verbose -10", &[]),
-            Some("rtk git log -10".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_preserves_grep_invert() {
-        assert_eq!(
-            rewrite_command("rg -v pattern src/", &[]),
-            Some("rtk grep -v pattern src/".into())
-        );
-    }
-
-    // --- #508: RTK_DISABLED detection helpers ---
-
-    #[test]
-    fn test_has_rtk_disabled_prefix() {
-        assert!(has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
-        assert!(has_rtk_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"));
-        assert!(has_rtk_disabled_prefix(
-            "RTK_DISABLED=true git log --oneline"
-        ));
-        assert!(!has_rtk_disabled_prefix("git status"));
-        assert!(!has_rtk_disabled_prefix("rtk git status"));
-        assert!(!has_rtk_disabled_prefix("SOME_VAR=1 git status"));
-    }
-
-    #[test]
-    fn test_strip_disabled_prefix() {
-        assert_eq!(
-            strip_disabled_prefix("RTK_DISABLED=1 git status"),
-            "git status"
-        );
-        assert_eq!(
-            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
-            "cargo test"
-        );
-        assert_eq!(strip_disabled_prefix("git status"), "git status");
     }
 }

@@ -219,7 +219,7 @@ rtk proxy <command>             # Raw passthrough + tracking
 
 ### Token Savings Analytics
 ```bash
-rtk gain                        # Summary stats
+rtk gain                        # Summary stats + command coverage + routing breakdown
 rtk gain --graph                # ASCII graph (last 30 days)
 rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown

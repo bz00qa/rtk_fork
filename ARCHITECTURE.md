@@ -284,6 +284,7 @@ ENVIRONMENT       env_cmd.rs        env                    60-80%     ✓
 
 SYSTEM            init.rs           init                   N/A        ✓
                   gain.rs           gain                   N/A        ✓
+                  discover/         discover               N/A        ✓
                   config.rs         (internal)             N/A        ✓
                   rewrite_cmd.rs    rewrite                N/A        ✓
 
@@ -878,6 +879,56 @@ Flow:
 
    Note: Time column shows average execution
    duration per command (added in v0.7.1)
+
+7. COMMAND COVERAGE (gain.rs)
+   ────────────────
+   $ rtk gain  (appended after summary)
+
+   COMMAND_REGISTRY maps each RTK command to a category:
+   ("git", "Git & VCS"), ("cargo", "Rust"), ("lint", "JS/TS"), ...
+
+   Output:
+   ┌────────────────────────────────────────────────┐
+   │ Command Coverage by Category                   │
+   ├──────────┬──────┬───────┬───────┬─────────────┤
+   │ Category │ Used │ Count │ Saved │ Unused      │
+   ├──────────┼──────┼───────┼───────┼─────────────┤
+   │ Git & VCS│ 5/7  │ 234   │ 12K   │ branch,push │
+   │ JS/TS    │ 3/8  │ 89    │ 5K    │ next,...    │
+   └──────────┴──────┴───────┴───────┴─────────────┘
+
+   Routing Breakdown:
+     Dedicated filters: 890 (72%)
+     Proxy passthrough:  210 (17%)
+     Unknown commands:   134 (11%)
+```
+
+### Discover Module (src/discover/)
+
+Analyzes Claude Code JSONL session history to find commands that could benefit from RTK filtering.
+
+```
+discover/
+├── mod.rs        Entry point, session scanning, consumer_base(), effective_idx
+├── registry.rs   classify_command() with PATTERNS/RULES arrays, env prefix handling
+├── report.rs     DiscoverReport, TokenConsumer, RtkHandling enum, text formatting
+└── rules.rs      PATTERNS regex array + RULES classification array (index-aligned)
+```
+
+**Key concepts:**
+
+- **consumer_base()**: Extracts the base command from complex invocations
+  (e.g., `python -m pytest` → `python -m pytest`, `pnpm --filter pkg test` → `pnpm test`)
+- **effective_idx**: Finds the meaningful command in chains like `cd dir && git status`
+  by skipping cd, env assignments, and other ignored prefixes
+- **RtkHandling**: Three-level classification for token consumers:
+  - `Filtered` — dedicated RTK filter with token savings
+  - `Passthrough` — routed through RTK but no filtering (0% savings)
+  - `None` — not handled by RTK
+- **TokenConsumer**: Ranks commands by total output tokens with RtkHandling annotation
+- **classify_command()**: Matches commands against PATTERNS/RULES arrays (must stay index-aligned)
+  to determine RtkStatus (Existing, Passthrough, NotSupported)
+
 ```
 
 ### Thread Safety
