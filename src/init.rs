@@ -511,7 +511,7 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
             fs::write(&claude_md_path, cleaned).with_context(|| {
                 format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
             })?;
-            removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
+            removed.push(format!("CLAUDE.md: removed @RTK.md reference"));
         }
     }
 
@@ -570,7 +570,7 @@ fn patch_settings_json(
     };
 
     // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    if hook_already_present(&root, &hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -595,7 +595,7 @@ fn patch_settings_json(
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, &hook_command);
 
     // Backup original
     if settings_path.exists() {

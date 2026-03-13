@@ -287,6 +287,8 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+> **Windows support**: On Windows, `rtk init -g` registers a native `rtk hook-rewrite` command as the PreToolUse hook — no bash or jq required. The hook runs as a plain executable, fully compatible with Claude Code on Windows.
+
 ## OpenCode Plugin (Global)
 
 OpenCode supports plugins that can intercept tool execution. RTK provides a global plugin that mirrors the Claude auto-rewrite behavior by rewriting Bash tool commands to `rtk ...` before they execute. This plugin is **not** installed by default.
