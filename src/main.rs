@@ -1,5 +1,6 @@
 mod aws_cmd;
 mod binlog;
+mod cache;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -437,6 +438,10 @@ enum Commands {
         #[arg(long)]
         create: bool,
     },
+
+    /// Clear the output cache (removes all cached command results)
+    #[command(name = "cache-clear", display_order = 101)]
+    CacheClear,
 
     /// Vitest commands with compact output
     Vitest {
@@ -1685,6 +1690,10 @@ fn main() -> Result<()> {
             } else {
                 config::show_config()?;
             }
+        }
+
+        Commands::CacheClear => {
+            cache::clear()?;
         }
 
         Commands::Vitest { command } => match command {

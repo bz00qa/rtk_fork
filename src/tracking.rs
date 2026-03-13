@@ -294,6 +294,11 @@ impl Tracker {
                 [],
             );
         }
+        // Migration: add cache_hit column to distinguish cache hits from normal commands
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN cache_hit INTEGER DEFAULT 0",
+            [],
+        );
         // Index for fast project-scoped gain queries // added
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
@@ -373,6 +378,43 @@ impl Tracker {
             ],
         )?;
 
+        self.cleanup_old()?;
+        Ok(())
+    }
+
+    /// Record a command execution that was served from cache.
+    /// Stored with cache_hit=1 so gain queries can exclude it.
+    pub fn record_cache_hit(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+        exec_time_ms: u64,
+    ) -> Result<()> {
+        let saved = input_tokens.saturating_sub(output_tokens);
+        let pct = if input_tokens > 0 {
+            (saved as f64 / input_tokens as f64) * 100.0
+        } else {
+            0.0
+        };
+        let project_path = current_project_path_string();
+
+        self.conn.execute(
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, cache_hit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+            params![
+                Utc::now().to_rfc3339(),
+                original_cmd,
+                rtk_cmd,
+                project_path,
+                input_tokens as i64,
+                output_tokens as i64,
+                saved as i64,
+                pct,
+                exec_time_ms as i64,
+            ],
+        )?;
         self.cleanup_old()?;
         Ok(())
     }
@@ -507,7 +549,8 @@ impl Tracker {
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
              FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -566,9 +609,10 @@ impl Tracker {
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -594,9 +638,10 @@ impl Tracker {
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
+             LIMIT 30",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -644,8 +689,9 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC", // added: project filter
+             ORDER BY DATE(timestamp) DESC",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -718,8 +764,9 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              GROUP BY week_start
-             ORDER BY week_start DESC", // added: project filter
+             ORDER BY week_start DESC",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -792,8 +839,9 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              GROUP BY month
-             ORDER BY month DESC", // added: project filter
+             ORDER BY month DESC",
         )?;
 
         let rows = stmt.query_map(params![project_exact, project_glob], |row| {
@@ -866,8 +914,9 @@ impl Tracker {
             "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND cache_hit = 0
              ORDER BY timestamp DESC
-             LIMIT ?3", // added: project filter
+             LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(
@@ -915,7 +964,7 @@ impl Tracker {
     /// Get overall savings percentage (for telemetry).
     pub fn overall_savings_pct(&self) -> Result<f64> {
         let (total_input, total_saved): (i64, i64) = self.conn.query_row(
-            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(saved_tokens), 0) FROM commands",
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(saved_tokens), 0) FROM commands WHERE cache_hit = 0",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -945,6 +994,20 @@ impl Tracker {
             |row| row.get(0),
         )?;
         Ok(saved)
+    }
+
+    /// Returns (cache_hit_count, total_input_tokens_avoided) for cache-hit rows.
+    pub fn get_cache_stats(&self, project_path: Option<&str>) -> Result<(usize, usize)> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let (count, tokens): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0)
+             FROM commands
+             WHERE cache_hit = 1
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)",
+            params![project_exact, project_glob],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((count as usize, tokens as usize))
     }
 }
 
@@ -1090,6 +1153,23 @@ impl TimedExecution {
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+        }
+    }
+
+    /// Track a cache hit (records with cache_hit=1 in the database).
+    pub fn track_cache_hit(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record_cache_hit(
                 original_cmd,
                 rtk_cmd,
                 input_tokens,
