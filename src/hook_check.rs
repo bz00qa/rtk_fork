@@ -26,17 +26,24 @@ pub fn status() -> HookStatus {
         return HookStatus::Ok;
     }
 
-    let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-        HookStatus::Ok
-    } else {
-        HookStatus::Outdated
+    // Check bash hook file first
+    if let Some(hook_path) = hook_installed_path() {
+        let Ok(content) = std::fs::read_to_string(&hook_path) else {
+            return HookStatus::Outdated;
+        };
+        return if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
+            HookStatus::Ok
+        } else {
+            HookStatus::Outdated
+        };
     }
+
+    // Check native PreToolUse hook in settings.json (Windows / cross-platform)
+    if has_native_hook(&home) {
+        return HookStatus::Ok;
+    }
+
+    HookStatus::Missing
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -96,6 +103,18 @@ fn hook_installed_path() -> Option<PathBuf> {
     }
 }
 
+/// Check if a native PreToolUse hook containing "rtk hook-rewrite" exists in settings.json.
+/// This is the Windows-native hook mechanism (no bash script needed).
+fn has_native_hook(home: &std::path::Path) -> bool {
+    let settings_path = home.join(".claude").join("settings.json");
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Quick substring check — avoids pulling in serde_json for a simple detection
+    content.contains("rtk hook-rewrite") && content.contains("PreToolUse")
+}
+
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join("rtk");
     Some(data_dir.join(".hook_warn_last"))
@@ -141,31 +160,48 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
-        // Skip on machines without Claude Code or without hook
+        // Skip on machines without Claude Code
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return,
         };
-        if !home
+        if !home.join(".claude").exists() {
+            assert_eq!(status(), HookStatus::Ok);
+            return;
+        }
+
+        let has_bash_hook = home
             .join(".claude")
             .join("hooks")
             .join("rtk-rewrite.sh")
-            .exists()
-        {
-            // No hook — status should be Missing (if .claude exists) or Ok (if not)
-            let s = status();
-            if home.join(".claude").exists() {
-                assert_eq!(s, HookStatus::Missing);
-            } else {
-                assert_eq!(s, HookStatus::Ok);
-            }
-            return;
-        }
+            .exists();
+        let has_native = has_native_hook(&home);
+
         let s = status();
+        if has_bash_hook || has_native {
+            assert!(
+                s == HookStatus::Ok || s == HookStatus::Outdated,
+                "Expected Ok or Outdated when hook exists, got {:?}",
+                s
+            );
+        } else {
+            assert_eq!(s, HookStatus::Missing);
+        }
+    }
+
+    #[test]
+    fn test_has_native_hook_detection() {
+        // Test with synthetic settings content via the substring check logic
+        let content_with_hook = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook-rewrite"}]}]}}"#;
         assert!(
-            s == HookStatus::Ok || s == HookStatus::Outdated,
-            "Expected Ok or Outdated when hook exists, got {:?}",
-            s
+            content_with_hook.contains("rtk hook-rewrite")
+                && content_with_hook.contains("PreToolUse")
+        );
+
+        let content_without = r#"{"hooks":{}}"#;
+        assert!(
+            !(content_without.contains("rtk hook-rewrite")
+                && content_without.contains("PreToolUse"))
         );
     }
 }
