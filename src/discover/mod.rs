@@ -258,8 +258,14 @@ pub fn run(
         .map(|(base, (count, total_bytes))| {
             let total_tokens = total_bytes / 4;
             let avg_tokens = if count > 0 { total_tokens / count } else { 0 };
+            // classify_command regexes require args (e.g. "find\s+"), so bare
+            // command names like "find" or "cat" won't match. Try with a dummy arg.
             let has_rtk_filter =
-                matches!(classify_command(&base), Classification::Supported { .. });
+                matches!(classify_command(&base), Classification::Supported { .. })
+                    || matches!(
+                        classify_command(&format!("{} .", &base)),
+                        Classification::Supported { .. }
+                    );
             TokenConsumer {
                 command: base,
                 count,
