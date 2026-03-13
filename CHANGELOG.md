@@ -5,6 +5,15 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `rtk context` — Generate project context summaries for LLMs (file tree, languages, dependencies)
+- `rtk watch` — Track command output changes over time with diff-based deduplication
+- `rtk watch-clear` — Clear watch history for a specific command
+- `rtk dedup` — Run any command and deduplicate repeated output lines with counts
+
 ## [0.28.2](https://github.com/rtk-ai/rtk/compare/v0.28.1...v0.28.2) (2026-03-10)
 
 

@@ -217,6 +217,14 @@ rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```
 
+### Context & Deduplication
+```bash
+rtk context .                   # Project context summary for LLMs
+rtk watch <command>             # Track command output changes over time
+rtk watch-clear <command>       # Clear watch history for a command
+rtk dedup <command>             # Run command, deduplicate repeated output
+```
+
 ### Token Savings Analytics
 ```bash
 rtk gain                        # Summary stats

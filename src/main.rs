@@ -1,4 +1,3 @@
-mod auto_filter;
 mod aws_cmd;
 mod binlog;
 mod cargo_cmd;
@@ -597,9 +596,6 @@ enum Commands {
 
     /// Execute command without filtering but track usage
     Proxy {
-        /// Apply auto noise reduction (ANSI strip, dedup, truncate)
-        #[arg(short = 'f', long)]
-        filter: bool,
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
@@ -2046,7 +2042,7 @@ fn main() -> Result<()> {
             rewrite_cmd::run(&cmd)?;
         }
 
-        Commands::Proxy { filter, args } => {
+        Commands::Proxy { args } => {
             use std::io::{Read, Write};
             use std::process::Stdio;
             use std::thread;
@@ -2081,123 +2077,90 @@ fn main() -> Result<()> {
             };
 
             if cli.verbose > 0 {
-                eprintln!(
-                    "Proxy mode{}: {} {}",
-                    if filter { " (filtered)" } else { "" },
-                    cmd_name,
-                    cmd_args.join(" ")
-                );
+                eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }
 
-            if filter {
-                // Filtered mode: capture all output, apply auto_filter, then print
-                let child_output = utils::resolved_command(cmd_name.as_ref())
-                    .args(&cmd_args)
-                    .output()
-                    .context(format!("Failed to execute command: {}", cmd_name))?;
+            // Raw passthrough mode: stream output and track usage
+            let mut child = utils::resolved_command(cmd_name.as_ref())
+                .args(&cmd_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context(format!("Failed to execute command: {}", cmd_name))?;
 
-                let stdout = String::from_utf8_lossy(&child_output.stdout);
-                let stderr = String::from_utf8_lossy(&child_output.stderr);
-                let full_output = format!("{}{}", stdout, stderr);
-                let success = child_output.status.success();
+            let stdout_pipe = child
+                .stdout
+                .take()
+                .context("Failed to capture child stdout")?;
+            let stderr_pipe = child
+                .stderr
+                .take()
+                .context("Failed to capture child stderr")?;
 
-                let (filtered_output, _) = auto_filter::filter_with_status(&full_output, success);
+            let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                let mut reader = stdout_pipe;
+                let mut captured = Vec::new();
+                let mut buf = [0u8; 8192];
 
-                println!("{}", filtered_output);
-
-                timer.track(
-                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                    &format!("rtk proxy -f {} {}", cmd_name, cmd_args.join(" ")),
-                    &full_output,
-                    &filtered_output,
-                );
-
-                if !success {
-                    std::process::exit(child_output.status.code().unwrap_or(1));
-                }
-            } else {
-                // Raw passthrough mode: stream output and track usage
-                let mut child = utils::resolved_command(cmd_name.as_ref())
-                    .args(&cmd_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context(format!("Failed to execute command: {}", cmd_name))?;
-
-                let stdout_pipe = child
-                    .stdout
-                    .take()
-                    .context("Failed to capture child stdout")?;
-                let stderr_pipe = child
-                    .stderr
-                    .take()
-                    .context("Failed to capture child stderr")?;
-
-                let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                    let mut reader = stdout_pipe;
-                    let mut captured = Vec::new();
-                    let mut buf = [0u8; 8192];
-
-                    loop {
-                        let count = reader.read(&mut buf)?;
-                        if count == 0 {
-                            break;
-                        }
-                        captured.extend_from_slice(&buf[..count]);
-                        let mut out = std::io::stdout().lock();
-                        out.write_all(&buf[..count])?;
-                        out.flush()?;
+                loop {
+                    let count = reader.read(&mut buf)?;
+                    if count == 0 {
+                        break;
                     }
-
-                    Ok(captured)
-                });
-
-                let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-                    let mut reader = stderr_pipe;
-                    let mut captured = Vec::new();
-                    let mut buf = [0u8; 8192];
-
-                    loop {
-                        let count = reader.read(&mut buf)?;
-                        if count == 0 {
-                            break;
-                        }
-                        captured.extend_from_slice(&buf[..count]);
-                        let mut err = std::io::stderr().lock();
-                        err.write_all(&buf[..count])?;
-                        err.flush()?;
-                    }
-
-                    Ok(captured)
-                });
-
-                let status = child
-                    .wait()
-                    .context(format!("Failed waiting for command: {}", cmd_name))?;
-
-                let stdout_bytes = stdout_handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
-                let stderr_bytes = stderr_handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
-
-                let stdout = String::from_utf8_lossy(&stdout_bytes);
-                let stderr = String::from_utf8_lossy(&stderr_bytes);
-                let full_output = format!("{}{}", stdout, stderr);
-
-                // Track usage (input = output since no filtering)
-                timer.track(
-                    &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                    &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
-                    &full_output,
-                    &full_output,
-                );
-
-                // Exit with same code as child process
-                if !status.success() {
-                    std::process::exit(status.code().unwrap_or(1));
+                    captured.extend_from_slice(&buf[..count]);
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&buf[..count])?;
+                    out.flush()?;
                 }
+
+                Ok(captured)
+            });
+
+            let stderr_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                let mut reader = stderr_pipe;
+                let mut captured = Vec::new();
+                let mut buf = [0u8; 8192];
+
+                loop {
+                    let count = reader.read(&mut buf)?;
+                    if count == 0 {
+                        break;
+                    }
+                    captured.extend_from_slice(&buf[..count]);
+                    let mut err = std::io::stderr().lock();
+                    err.write_all(&buf[..count])?;
+                    err.flush()?;
+                }
+
+                Ok(captured)
+            });
+
+            let status = child
+                .wait()
+                .context(format!("Failed waiting for command: {}", cmd_name))?;
+
+            let stdout_bytes = stdout_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("stdout streaming thread panicked"))??;
+            let stderr_bytes = stderr_handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("stderr streaming thread panicked"))??;
+
+            let stdout = String::from_utf8_lossy(&stdout_bytes);
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let full_output = format!("{}{}", stdout, stderr);
+
+            // Track usage (input = output since no filtering)
+            timer.track(
+                &format!("{} {}", cmd_name, cmd_args.join(" ")),
+                &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
+                &full_output,
+                &full_output,
+            );
+
+            // Exit with same code as child process
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
             }
         }
 
