@@ -514,6 +514,26 @@ fn consumer_base(cmd: &str) -> String {
         return "pnpm".to_string();
     }
 
+    // Commands where the second word is a path/file argument, not a subcommand.
+    // Group by command name only (optionally with flags).
+    const ARG_COMMANDS: &[&str] = &[
+        "cat", "head", "tail", "wc", "less", "more", "touch", "rm", "cp", "mv", "mkdir", "chmod",
+        "chown", "file", "stat", "du", "df", "sort", "uniq", "cut", "tr", "tee", "xargs",
+    ];
+    if ARG_COMMANDS.contains(&words[0]) {
+        return words[0].to_string();
+    }
+
+    // grep/find/ls: keep first flag if present (e.g. "grep -n", "find .", "ls -la")
+    const FLAG_COMMANDS: &[&str] = &["grep", "find", "ls"];
+    if FLAG_COMMANDS.contains(&words[0]) && words.len() >= 2 {
+        // Keep first flag (-n, -la, etc.) but not path arguments
+        if words[1].starts_with('-') {
+            return format!("{} {}", words[0], words[1]);
+        }
+        return words[0].to_string();
+    }
+
     // Default: first 2 words
     if words.len() >= 2 {
         format!("{} {}", words[0], words[1])

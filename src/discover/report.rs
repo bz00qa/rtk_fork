@@ -251,39 +251,74 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     // Top token consumers
     if !report.consumers.is_empty() {
+        // Compute dynamic column widths for Total and Avg
+        let total_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| format_tokens(c.total_tokens).len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let avg_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| format_tokens(c.avg_tokens).len())
+            .max()
+            .unwrap_or(3)
+            .max(3);
+        // Compute count column width dynamically too
+        let count_w = report
+            .consumers
+            .iter()
+            .take(limit)
+            .map(|c| c.count.to_string().len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        let table_w = 4 + 22 + 2 + count_w + 2 + total_w + 2 + avg_w + 3 + 4;
+
         out.push_str(&format!(
             "\n{}\n",
             styled("TOP TOKEN CONSUMERS (by output size)")
         ));
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
         out.push_str(&format!(
-            "  {:<3} {:<22} {:>5}  {:>9} {:>9}   {}\n",
-            "#", "Command", "Count", "Total", "Avg", "RTK?"
+            "  {:<3} {:<22} {:>count_w$}  {:>total_w$}  {:>avg_w$}   {}\n",
+            "#",
+            "Command",
+            "Count",
+            "Total",
+            "Avg",
+            "RTK?",
+            count_w = count_w,
+            total_w = total_w,
+            avg_w = avg_w,
         ));
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
 
         for (i, c) in report.consumers.iter().take(limit).enumerate() {
             let rtk_label = if c.has_rtk_filter {
                 styled("Yes")
+            } else if std::io::stdout().is_terminal() {
+                "No".red().bold().to_string()
             } else {
-                if std::io::stdout().is_terminal() {
-                    "No".red().bold().to_string()
-                } else {
-                    "No".to_string()
-                }
+                "No".to_string()
             };
             out.push_str(&format!(
-                " {:>2}.  {} {:>5}  {} {}   {}\n",
+                " {:>2}.  {} {:>count_w$}  {}  {}   {}\n",
                 i + 1,
                 pad_right(&truncate_str(&c.command, 22), 22, style_cmd),
                 c.count,
-                pad_left(&format_tokens(c.total_tokens), 9, style_tokens),
-                pad_left(&format_tokens(c.avg_tokens), 9, style_tokens),
+                pad_left(&format_tokens(c.total_tokens), total_w, style_tokens),
+                pad_left(&format_tokens(c.avg_tokens), avg_w, style_tokens),
                 rtk_label,
+                count_w = count_w,
             ));
         }
 
-        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(72))));
+        out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
 
         let has_unfiltered = report
             .consumers
@@ -531,6 +566,82 @@ mod tests {
             header_rtk_pos, data1_rtk_pos,
             "Header vs data RTK column misaligned:\n  '{}'\n  '{}'",
             header_line, data_line_1
+        );
+    }
+
+    #[test]
+    fn test_consumers_table_alignment() {
+        let report = DiscoverReport {
+            supported: vec![],
+            // Need at least one unsupported entry to avoid early return
+            unsupported: vec![UnsupportedEntry {
+                base_command: "dummy".into(),
+                count: 1,
+                example: "dummy".into(),
+            }],
+            patterns: vec![],
+            consumers: vec![
+                TokenConsumer {
+                    command: "git diff".into(),
+                    count: 99,
+                    total_tokens: 121600,
+                    avg_tokens: 1228,
+                    has_rtk_filter: true,
+                },
+                TokenConsumer {
+                    command: "cargo test".into(),
+                    count: 91,
+                    total_tokens: 59100,
+                    avg_tokens: 649,
+                    has_rtk_filter: true,
+                },
+                TokenConsumer {
+                    command: "grep -n".into(),
+                    count: 73,
+                    total_tokens: 5300,
+                    avg_tokens: 72,
+                    has_rtk_filter: true,
+                },
+            ],
+            total_commands: 263,
+            sessions_scanned: 10,
+            already_rtk: 0,
+            since_days: 30,
+            parse_errors: 0,
+            rtk_disabled_count: 0,
+            rtk_disabled_examples: vec![],
+        };
+
+        let output = format_text(&report, 20, false);
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Find header and data lines in TOP TOKEN CONSUMERS
+        let header = lines
+            .iter()
+            .find(|l| l.contains("Command") && l.contains("Total") && l.contains("Avg"))
+            .expect("consumers header not found");
+        let row1 = lines
+            .iter()
+            .find(|l| l.contains("git diff"))
+            .expect("git diff row not found");
+        let row3 = lines
+            .iter()
+            .find(|l| l.contains("grep -n"))
+            .expect("grep row not found");
+
+        // RTK? column should align
+        let header_rtk = header.find("RTK?").unwrap();
+        let row1_rtk = row1.find("Yes").unwrap();
+        let row3_rtk = row3.find("Yes").unwrap();
+        assert_eq!(
+            row1_rtk, row3_rtk,
+            "RTK? column misaligned between rows:\n  '{}'\n  '{}'",
+            row1, row3
+        );
+        assert_eq!(
+            header_rtk, row1_rtk,
+            "RTK? header vs data misaligned:\n  '{}'\n  '{}'",
+            header, row1
         );
     }
 }
