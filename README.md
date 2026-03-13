@@ -137,6 +137,7 @@ Four strategies applied per command type:
 rtk ls .                        # Token-optimized directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk read README.md --diet       # Markdown diet: strip code blocks, tables, checklists
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
