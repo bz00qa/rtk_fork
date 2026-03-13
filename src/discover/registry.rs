@@ -99,13 +99,7 @@ pub fn classify_command(cmd: &str) -> Classification {
             .skip(1)
             .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
         if has_redirect {
-            return Classification::Unsupported {
-                base_command: cmd_clean
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("cat")
-                    .to_string(),
-            };
+            return Classification::Ignored; // writes (redirects) are not filterable
         }
     }
 
