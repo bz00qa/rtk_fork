@@ -5,6 +5,14 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **discover:** expand subcommand coverage for git (51), cargo (13), pnpm (21), npm (25), and go (14) — reduces false-negative missed-savings reports for common compound commands
+* **discover:** strip `-v`/`--verbose` flags during command rewriting so verbose invocations map correctly to their RTK equivalents
+* **discover:** fix ENV_PREFIX regex to handle quoted env values containing spaces (e.g. `FOO="bar baz" git status`)
+
 ## [0.28.2](https://github.com/rtk-ai/rtk/compare/v0.28.1...v0.28.2) (2026-03-10)
 
 
