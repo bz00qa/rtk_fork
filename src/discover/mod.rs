@@ -260,18 +260,27 @@ pub fn run(
             let avg_tokens = if count > 0 { total_tokens / count } else { 0 };
             // classify_command regexes require args (e.g. "find\s+"), so bare
             // command names like "find" or "cat" won't match. Try with a dummy arg.
-            let has_rtk_filter =
-                matches!(classify_command(&base), Classification::Supported { .. })
-                    || matches!(
-                        classify_command(&format!("{} .", &base)),
-                        Classification::Supported { .. }
-                    );
+            let classification = match classify_command(&base) {
+                c @ Classification::Supported { .. } => c,
+                _ => classify_command(&format!("{} .", &base)),
+            };
+            let rtk_handling = match classification {
+                Classification::Supported {
+                    status: report::RtkStatus::Existing,
+                    ..
+                } => report::RtkHandling::Filtered,
+                Classification::Supported {
+                    status: report::RtkStatus::Passthrough,
+                    ..
+                } => report::RtkHandling::Passthrough,
+                _ => report::RtkHandling::None,
+            };
             TokenConsumer {
                 command: base,
                 count,
                 total_tokens,
                 avg_tokens,
-                has_rtk_filter,
+                rtk_handling,
             }
         })
         .collect();

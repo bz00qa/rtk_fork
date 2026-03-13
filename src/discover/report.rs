@@ -52,6 +52,17 @@ pub struct PatternOpportunity {
     pub estimated_savings_tokens: usize,
 }
 
+/// RTK handling level for a token consumer.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+pub enum RtkHandling {
+    /// Dedicated filter with token savings
+    Filtered,
+    /// Routed through RTK but no filtering (0% savings)
+    Passthrough,
+    /// Not handled by RTK at all
+    None,
+}
+
 /// A command ranked by total output tokens consumed.
 #[derive(Debug, Serialize)]
 pub struct TokenConsumer {
@@ -59,7 +70,7 @@ pub struct TokenConsumer {
     pub count: usize,
     pub total_tokens: usize,
     pub avg_tokens: usize,
-    pub has_rtk_filter: bool,
+    pub rtk_handling: RtkHandling,
 }
 
 /// Full discover report.
@@ -299,12 +310,22 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         out.push_str(&format!("{}\n", styled(&"\u{2500}".repeat(table_w))));
 
         for (i, c) in report.consumers.iter().take(limit).enumerate() {
-            let rtk_label = if c.has_rtk_filter {
-                styled("Yes")
-            } else if std::io::stdout().is_terminal() {
-                "No".red().bold().to_string()
-            } else {
-                "No".to_string()
+            let rtk_label = match c.rtk_handling {
+                RtkHandling::Filtered => styled("Yes"),
+                RtkHandling::Passthrough => {
+                    if std::io::stdout().is_terminal() {
+                        "Pass".yellow().to_string()
+                    } else {
+                        "Pass".to_string()
+                    }
+                }
+                RtkHandling::None => {
+                    if std::io::stdout().is_terminal() {
+                        "No".red().bold().to_string()
+                    } else {
+                        "No".to_string()
+                    }
+                }
             };
             out.push_str(&format!(
                 " {:>2}.  {} {:>count_w$}  {}  {}   {}\n",
@@ -324,7 +345,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             .consumers
             .iter()
             .take(limit)
-            .any(|c| !c.has_rtk_filter);
+            .any(|c| c.rtk_handling == RtkHandling::None);
         if has_unfiltered {
             out.push_str(
                 "  RTK?=No: not yet filtered. Request support:\n  \
@@ -586,21 +607,21 @@ mod tests {
                     count: 99,
                     total_tokens: 121600,
                     avg_tokens: 1228,
-                    has_rtk_filter: true,
+                    rtk_handling: RtkHandling::Filtered,
                 },
                 TokenConsumer {
                     command: "cargo test".into(),
                     count: 91,
                     total_tokens: 59100,
                     avg_tokens: 649,
-                    has_rtk_filter: true,
+                    rtk_handling: RtkHandling::Filtered,
                 },
                 TokenConsumer {
                     command: "grep -n".into(),
                     count: 73,
                     total_tokens: 5300,
                     avg_tokens: 72,
-                    has_rtk_filter: true,
+                    rtk_handling: RtkHandling::Passthrough,
                 },
             ],
             total_commands: 263,
@@ -629,10 +650,10 @@ mod tests {
             .find(|l| l.contains("grep -n"))
             .expect("grep row not found");
 
-        // RTK? column should align
+        // RTK? column should align — Yes/Pass/No all start at same column
         let header_rtk = header.find("RTK?").unwrap();
         let row1_rtk = row1.find("Yes").unwrap();
-        let row3_rtk = row3.find("Yes").unwrap();
+        let row3_rtk = row3.find("Pass").unwrap();
         assert_eq!(
             row1_rtk, row3_rtk,
             "RTK? column misaligned between rows:\n  '{}'\n  '{}'",
